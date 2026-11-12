@@ -186,16 +186,31 @@ void portAddrInit(void)
         /* Non-clobbering: VM_FLAGS_FIXED without VM_FLAGS_OVERWRITE fails with
          * KERN_NO_SPACE if the range is already in use, rather than silently
          * replacing a live mapping (mmap MAP_FIXED on macOS does the latter). */
-        mach_vm_address_t addr = (mach_vm_address_t)PORT_ADDR_BASE;
-        kern_return_t kr = mach_vm_map(mach_task_self(), &addr,
-                                       (mach_vm_size_t)PORT_ADDR_WINDOW, 0,
-                                       VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
-                                       VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
-        if (kr != KERN_SUCCESS || addr != (mach_vm_address_t)PORT_ADDR_BASE) {
-            sysFatalError("portAddr: cannot reserve the 4 GiB N64 window at "
-                          "0x%llx (%s). See docs/dev/MACOS-ARM64-PLAN.md sec 2.",
-                          (unsigned long long)PORT_ADDR_BASE, mach_error_string(kr));
+        /* Only the regions the port maps (portaddr.h), not the whole 4 GiB
+         * window: the rest is never touched, so the OS keeps it. */
+        static const struct { unsigned long long off, size; const char *what; } regions[] = {
+            { PORT_CART_OFF,          PORT_CART_RESERVE,      "cart (ROM + sidecars)" },
+            { 0x70000000ULL,          PORT_DRAM_SIZE,         "DRAM" },
+            { 0x80000000ULL,          PORT_DRAM_SIZE,         "DRAM KSEG0 mirror" },
+            { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE, "thread stacks" },
+        };
+        unsigned long long total = 0;
+        for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
+            mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
+            kern_return_t kr = mach_vm_map(mach_task_self(), &addr,
+                                           (mach_vm_size_t)regions[i].size, 0,
+                                           VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
+                                           VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+            if (kr != KERN_SUCCESS || addr != (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off)) {
+                sysFatalError("portAddr: cannot reserve the %s region (%llu MB) at 0x%llx (%s). "
+                              "See docs/dev/MACOS-ARM64-PLAN.md sec 2.", regions[i].what,
+                              regions[i].size >> 20,
+                              (unsigned long long)(PORT_ADDR_BASE + regions[i].off), mach_error_string(kr));
+            }
+            total += regions[i].size;
         }
+        sysLogPrintf(LOG_INFO, "portAddr: reserved %llu MB of address space in %d regions",
+                     total >> 20, (int)(sizeof(regions) / sizeof(regions[0])));
     }
 #endif
 

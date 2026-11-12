@@ -440,6 +440,14 @@ int romdataInit(void)
 #else
             flags |= MAP_FIXED;
 #endif
+#if PORT_ADDR_BASE != 0
+            /* Darwin: MAP_FIXED replaces whatever is there, so the cart must
+             * stay inside the region portAddrInit reserved for it. */
+            if ((unsigned long long)maplen > PORT_CART_RESERVE) {
+                sysFatalError("romdataInit: ROM + sidecars (%u bytes) exceed the reserved "
+                              "cart region (%llu MB)", maplen, PORT_CART_RESERVE >> 20);
+            }
+#endif
             void *at = mmap((void *)CART_HOST, maplen,
                             PROT_READ | PROT_WRITE, flags, -1, 0);
             int mapErrno = errno;

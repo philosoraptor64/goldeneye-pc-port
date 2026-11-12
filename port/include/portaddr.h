@@ -92,6 +92,16 @@
 #define PORT_DRAM_SIZE     0x00800000UL  /* 8 MB, like an 8-MB-RAM N64 */
 #endif
 
+/* The regions the port maps inside the window (offsets from PORT_ADDR_BASE).
+ * Where the window is shifted (Darwin), portAddrInit reserves exactly these
+ * -- about 220 MB of address space -- instead of the whole 4 GiB: the rest of
+ * the window is never mapped, so it is left to the OS. Each reservation is
+ * non-clobbering, and the fixed mappings made later land inside them. */
+#define PORT_CART_OFF          0x10000000ULL   /* ROM + model/bg sidecars (romdata.c) */
+#define PORT_CART_RESERVE      (64ULL << 20)   /* an N64 cart is at most 64 MB, sidecars ~5 MB */
+#define PORT_STACK_REGION_OFF  0xA0000000ULL   /* game-thread stacks (libultra.c) */
+#define PORT_STACK_REGION_SIZE (144ULL << 20)  /* 16 threads x (8 MB + 16 KB guard) */
+
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 

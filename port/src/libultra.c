@@ -467,8 +467,7 @@ void osCreateThread(OSThread *t, OSId id, void (*entry)(void *), void *arg,
  *
  * On Linux (PORT_ADDR_BASE == 0) the window is not reserved, so keep the
  * original MAP_32BIT allocation: addresses below 2 GiB truncate identically. */
-#define PORT_STACK_REGION_OFF  0xA0000000ULL
-#define PORT_STACK_REGION_SIZE (512ULL << 20)
+/* PORT_STACK_REGION_OFF / _SIZE: port/include/portaddr.h */
 #define PORT_STACK_GUARD       0x4000ULL
 
 static uintptr_t s_stackNext = 0;
