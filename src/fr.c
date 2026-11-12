@@ -82,20 +82,29 @@ s32 g_viColorOutputMode = COLORMODE_16BIT;
  * Address 800232B0.
  * g_ViShakeIntensity multiplier sign. This is only ever 1 or -1.
  */
-s32 g_viVstartSign = 1;
+#ifdef PORT
+/* screen shake: the scheduler thread runs it per retrace (viVsyncRelated);
+ * outside rollback snapshots (port/include/gesnap.h) */
+#ifndef GE_SNAPSHOT_OUTSIDE_DATA
+#define GE_SNAPSHOT_OUTSIDE_DATA
+#endif
+#else
+#define GE_SNAPSHOT_OUTSIDE_DATA
+#endif
+GE_SNAPSHOT_OUTSIDE_DATA s32 g_viVstartSign = 1;
 
 /**
  * Address 800232B4.
  * vimode vStart vertical offset in viVsyncRelated.
  * (see D_800232A0 before changing the name)
  */
-s32 g_ViShakeIntensity = 0;
+GE_SNAPSHOT_OUTSIDE_DATA s32 g_ViShakeIntensity = 0;
 
 /**
  * Address 800232B8.
  * Some kind of counter for how frequently g_ViShakeIntensity is zero'd in viVsyncRelated.
  */
-u32 g_ViShakeTimer = 0;
+GE_SNAPSHOT_OUTSIDE_DATA u32 g_ViShakeTimer = 0;
 
 /**
  * Address 800232BC.

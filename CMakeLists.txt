@@ -464,6 +464,10 @@ if(NOT MINGW)
       $<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>
       $<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>)
     add_compile_definitions(_FORTIFY_SOURCE=0)
+    # Apple clang still defaults to -fcommon; tentative definitions (`s32 x;`)
+    # would land in __DATA,__common, which a section pragma can't move (the
+    # rollback snapshot segment, gesnap.h). GCC's default, and what links.
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-fno-common>)
   endif()
 endif()
 
@@ -914,10 +918,16 @@ set(SRC
 # globals into the __GESNAP segment (Apple clang only). Not audio (its own
 # thread), the scheduler, the thread stacks or the port layer.
 if(GE_HAVE_METAL)
-  set(_GE_SNAP_SRC ${SRC_GAME} ${SRC_ENGINE})
-  foreach(_x src/audi.c src/snd.c src/music.c src/sched.c src/stacks.c)
-    list(REMOVE_ITEM _GE_SNAP_SRC "${CMAKE_SOURCE_DIR}/${_x}")
+  set(_GE_SNAP_SRC ${SRC_GAME} ${SRC_ENGINE} ${_MACHO_GENERATED_SOURCES}
+      "${CMAKE_SOURCE_DIR}/port/src/drawdistgameplay.c"    # D466 room sets: gameplay state
+      "${CMAKE_SOURCE_DIR}/port/src/random.c")             # the game's RNG seeds
+  # (SRC_ENGINE holds paths relative to the source dir)
+  # joy.c: the scheduler thread polls into it; genet saves the playback half itself
+  foreach(_x src/audi.c src/snd.c src/music.c src/sched.c src/stacks.c src/init.c src/speed_graph.c src/joy.c)
+    list(REMOVE_ITEM _GE_SNAP_SRC "${CMAKE_SOURCE_DIR}/${_x}" "${_x}")
   endforeach()
+  list(REMOVE_ITEM _GE_SNAP_SRC "${CMAKE_SOURCE_DIR}"
+       "${CMAKE_SOURCE_DIR}/src/game/speedgraphrenderer.c")   # performance graph (display only)
   set_source_files_properties(${_GE_SNAP_SRC} PROPERTIES COMPILE_OPTIONS
     "-include;${CMAKE_SOURCE_DIR}/port/include/gesnap.h;-DGE_SNAPSHOT_FORCE")
 endif()

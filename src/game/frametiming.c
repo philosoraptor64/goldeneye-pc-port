@@ -46,8 +46,17 @@ s32 previousFrameCounter = -1;
 s32 halfFrameCounter = 0; // half of currentFrameCounter
 s32 isFrameCounterOdd = 0; // is currentFrameCounter Odd
 s32 halfMinusPreviousCounter = 0; // half - previousFrameCounter
+#ifdef PORT
+/* wall-clock copies: outside rollback snapshots (port/include/gesnap.h) */
+#ifndef GE_SNAPSHOT_OUTSIDE_DATA
+#define GE_SNAPSHOT_OUTSIDE_DATA
+#endif
+GE_SNAPSHOT_OUTSIDE_DATA u32 copy_of_osgetcount_value_0 = 0;
+GE_SNAPSHOT_OUTSIDE_DATA u32 copy_of_osgetcount_value_1 = 0;
+#else
 u32 copy_of_osgetcount_value_0 = 0;
 u32 copy_of_osgetcount_value_1 = 0;
+#endif
 s32 frameDelay = 1; //usually 1
 
 

@@ -43,6 +43,13 @@ s32 g_unused8004E9EC = 0;
 /**
  * Address 8004E9F0.
  */
+#ifdef PORT
+/* rollback snapshots: the scheduler side fills these (gesnap.h) */
+#ifndef GE_SNAPSHOT_OUTSIDE_DATA
+#define GE_SNAPSHOT_OUTSIDE_DATA
+#endif
+GE_SNAPSHOT_OUTSIDE_DATA
+#endif
 struct GfxInfo_s g_gfxTaskSettings[2] = 
 {
     // 8004EA50
@@ -231,6 +238,12 @@ void rspGfxTaskStart(Gfx *firstGdl, Gfx *gdl, s32 arg2, OSMesg rspReplyMsg)
 
     sctask = &((struct GfxInfo_s *)g_gfxTaskSettingsList)->task;
     task = &sctask->list;
+#ifdef PORT
+    {
+        extern volatile int g_portGfxSubmitted;   /* port/src/libultra.c (rollback) */
+        g_portGfxSubmitted++;
+    }
+#endif
 
     task->t.ucode_boot = (u64*)rspbootTextStart;
     

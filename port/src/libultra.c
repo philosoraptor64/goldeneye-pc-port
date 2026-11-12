@@ -1372,6 +1372,11 @@ static void portNoteSwapReturn(void)
         sysLogPrintf(LOG_NOTE, "D600: tick lock phase=%lld us err=%lld us nudge=%lld us", (long long)phase, (long long)err, (long long)nudge);
 }
 
+/* Rollback (genet.c): gfx tasks the game submitted (src/game/rsp.c) and the
+ * ones drawn; equal = no display list is still waiting to be read. */
+volatile int g_portGfxSubmitted = 0;
+static volatile int s_gfxDrawn = 0;
+
 static void portRenderGfxTask(Gfx *dl)
 {
     uint64_t t0 = sysGetMicroseconds();
@@ -1414,9 +1419,17 @@ static int s_rwMode = 0;       /* 0 = undecided, 1 = worker, -1 = inline */
  * lists, wait until the render worker has finished the one it is drawing. */
 void portRenderWaitIdle(void)
 {
-    while (__atomic_load_n(&s_rwTask, __ATOMIC_ACQUIRE) != NULL) {
+    /* every submitted display list drawn (a queued one may not have reached
+     * the worker yet); give up after 2 s rather than hang */
+    for (int i = 0; i < 10000; i++) {
+        if (__atomic_load_n(&s_gfxDrawn, __ATOMIC_ACQUIRE) >= g_portGfxSubmitted &&
+            __atomic_load_n(&s_rwTask, __ATOMIC_ACQUIRE) == NULL) {
+            return;
+        }
         sysSleep(200);
     }
+    sysLogPrintf(LOG_WARNING, "rollback: render still busy after 2 s (%d submitted, %d drawn)",
+                 g_portGfxSubmitted, s_gfxDrawn);
 }
 
 /* D578: frame interpolation pacing (worker thread only; fast3d does the
@@ -2030,6 +2043,7 @@ static void *portRenderWorker(void *arg)
             const int64_t d0 = (int64_t)sysGetMicroseconds();
             const int q0 = s_qLen;
             portRenderGfxTaskInterp(dl, viUs, hz);
+            __atomic_add_fetch(&s_gfxDrawn, 1, __ATOMIC_RELEASE);
             if (portInterpLog())   /* D583: line late presents up against the draw they fell in */
                 sysLogPrintf(LOG_NOTE, "IPLOG draw at=%lld dur=%lld vi+%lld q %d->%d next_due=%lld",
                              (long long)d0, (long long)((int64_t)sysGetMicroseconds() - d0),
@@ -2043,6 +2057,7 @@ static void *portRenderWorker(void *arg)
                 gfx_interp_reset();
             }
             portRenderGfxTask(dl);
+            __atomic_add_fetch(&s_gfxDrawn, 1, __ATOMIC_RELEASE);
         }
 
         pthread_mutex_lock(&s_rwLock);
@@ -2122,6 +2137,7 @@ void osSpTaskStartGo(OSTask *t)
     } else {
         /* Graphics task: run the software RSP on the display list inline. */
         portRenderGfxTask((Gfx *)t->t.data_ptr);
+        __atomic_add_fetch(&s_gfxDrawn, 1, __ATOMIC_RELEASE);
     }
 
     portPostEventForce(OS_EVENT_SP);   /* D134: must not be dropped */

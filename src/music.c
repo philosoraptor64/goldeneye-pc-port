@@ -680,6 +680,13 @@ void musicSeqPlayerInit(void)
     } while (p < mempAddress + MUSIC_ALLOCATION_BYTES);
 
     alHeapInit(&g_musicHeap, mempAddress, MUSIC_ALLOCATION_BYTES);
+#ifdef PORT
+    {
+        /* rollback snapshots leave the audio thread's heap out (port/src/gesnap.c) */
+        extern void gesnapExcludeRange(void *p, unsigned long size);
+        gesnapExcludeRange(mempAddress, MUSIC_ALLOCATION_BYTES);
+    }
+#endif
 
     if (MUSIC_CONFIG_USE_SFX_BANK)
     {

@@ -17,12 +17,14 @@
 #define GE_SNAPSHOT_SUPPORTED 1
 #define GE_SNAPSHOT_SEGMENT "__GESNAP"
 #define GE_SNAPSHOT_OUTSIDE __attribute__((section("__DATA,__bss")))
+#define GE_SNAPSHOT_OUTSIDE_DATA __attribute__((section("__DATA,__data")))
 #if defined(GE_SNAPSHOT_FORCE) && !defined(__cplusplus) && !defined(__ASSEMBLER__)
 #pragma clang section bss = "__GESNAP,__bss" data = "__GESNAP,__data"
 #endif
 #else
 #define GE_SNAPSHOT_SUPPORTED 0
 #define GE_SNAPSHOT_OUTSIDE
+#define GE_SNAPSHOT_OUTSIDE_DATA
 #endif
 
 #endif

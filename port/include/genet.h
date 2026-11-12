@@ -18,6 +18,7 @@ void gesnapSave(int slot);
 int gesnapLoad(int slot);
 void gesnapInvalidateAll(void);
 size_t gesnapCompareLive(int slot, char *report, size_t cap);
+void gesnapDumpDiff(int slot, const char *path);
 double gesnapLastSaveMs(void);
 double gesnapLastLoadMs(void);
 size_t gesnapSize(void);

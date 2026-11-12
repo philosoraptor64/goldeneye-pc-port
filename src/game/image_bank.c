@@ -12,7 +12,15 @@
 
 // bss
 //8008D0A0
+#ifdef PORT
+/* decode cursor, reset before every use: outside rollback snapshots (gesnap.h) */
+#ifndef GE_SNAPSHOT_OUTSIDE
+#define GE_SNAPSHOT_OUTSIDE
+#endif
+GE_SNAPSHOT_OUTSIDE u8* img_curpos;
+#else
 u8* img_curpos;
+#endif
 //8008D0A4
 u32 img_curdatatable;
 //8008D0A8

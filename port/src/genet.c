@@ -274,6 +274,10 @@ static void hashBytes(const void *p, size_t n)
 
 #define HASHV(v) hashBytes(&(v), sizeof(v))
 
+static u64 s_HPart;
+static int s_HDetail = 0;
+#define HPART(name) do { if (s_HDetail) { netLog("  hash %-12s %016llx", name, (unsigned long long)s_H); } } while (0)
+
 static u64 genetStateHash(void)
 {
     s_H = 0xcbf29ce484222325ULL;
@@ -282,12 +286,14 @@ static u64 genetStateHash(void)
     HASHV(g_chrObjRandomSeed);
     HASHV(g_GlobalTimer);
     HASHV(currentFrameCounter);
+    HPART("seeds");
     HASHV(g_StageNum);
     HASHV(current_menu);
     HASHV(menu_update);
     HASHV(selected_stage);
     HASHV(MP_stage_selected);
 
+    HPART("timers+menu");
     /* only the stage's players: the other pointers can be stale across a
      * stage change; no pointer chasing through props for the same reason */
     {
@@ -304,6 +310,7 @@ static u64 genetStateHash(void)
         }
     }
 
+    HPART("players");
     if (g_ChrSlots && portAddrIsMapped(g_ChrSlots)) {
         for (s32 i = 0; i < g_NumChrSlots; i++) {
             struct ChrRecord *c = &g_ChrSlots[i];
@@ -814,6 +821,20 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
 
     menuLog(tick);
     updateFullView();
+    {
+        const char *d = envStr("GE_NET_HASHDETAIL");
+        s_HDetail = d && (u32)atoi(d) == tick;
+        if (s_HDetail) {
+            netLog("hash detail, tick %u: seed %016llx chrseed %016llx globaltimer %d frame %d", tick,
+                   (unsigned long long)g_randomSeed, (unsigned long long)g_chrObjRandomSeed, g_GlobalTimer,
+                   currentFrameCounter);
+            for (int i = 0; i < 4 && i < getPlayerCount(); i++) {
+                struct player *pl = g_playerPointers[i];
+                if (pl) netLog("  p%d pos %.4f %.4f %.4f theta %.4f health %.3f", i, pl->pos.x, pl->pos.y, pl->pos.z,
+                               pl->vv_theta, pl->bondhealth);
+            }
+        }
+    }
     h = genetStateHash();
     if (s_HashLog) {
         fprintf(s_HashLog, "%u %016llx\n", tick, (unsigned long long)h);
@@ -995,8 +1016,8 @@ static void resimFrame(void)
  * the current stage. */
 static int rewindTo(u32 from)
 {
+    portRenderWaitIdle();   /* first: the GPU may still read the memory we restore */
     if (!gesnapLoad((int)from)) return 0;
-    portRenderWaitIdle();   /* the GPU may still read the display list we rewrite */
     s_Resim = 1;
     s_ResimTick = from;
     for (u32 t = from; t < s_Tick; t++) {
@@ -1035,10 +1056,15 @@ static void frameBoundary(void)
         diff = gesnapCompareLive((int)s_Tick, report, sizeof(report));
         s_SyncChecks++;
         if (diff) {
+            if (s_SyncMismatches == 0 && envStr("GE_SYNCTEST_DUMP")) {
+                gesnapDumpDiff((int)s_Tick, envStr("GE_SYNCTEST_DUMP"));
+            }
             if (s_SyncMismatches++ < 12) {
                 netLog("SyncTest: MISMATCH before tick %u (rewound %d): %zu bytes differ:%s", s_Tick, s_SyncTest, diff, report);
             }
-            gesnapLoad((int)s_Tick); /* go on from the original state */
+            if (!envStr("GE_SYNCTEST_CONTINUE")) {
+                gesnapLoad((int)s_Tick); /* go on from the original state */
+            }
         }
         if (s_SyncChecks % 600 == 0) {
             netLog("SyncTest: tick %u, %u checks, %u mismatches, snapshot %zu KB, save %.2f ms, load %.2f ms",

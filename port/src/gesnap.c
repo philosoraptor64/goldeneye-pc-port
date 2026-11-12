@@ -40,6 +40,8 @@ typedef struct {
     int valid;
 } Slot;
 
+#undef MAX_RANGES
+#define MAX_RANGES 8
 static Range s_R[MAX_RANGES];
 static int s_NumR = 0;
 static size_t s_Total = 0;
@@ -58,6 +60,17 @@ int gesnapSupported(void)
     return 1;
 }
 
+/* A part of the DRAM arena another thread owns (the audio heap, src/music.c):
+ * left out of snapshots. Called at boot, before gesnapInit. */
+static unsigned char *s_ExclBase = NULL;
+static size_t s_ExclSize = 0;
+
+void gesnapExcludeRange(void *p, unsigned long size)
+{
+    s_ExclBase = (unsigned char *)p;
+    s_ExclSize = (size_t)size;
+}
+
 int gesnapInit(int slots)
 {
     unsigned long size = 0;
@@ -70,7 +83,23 @@ int gesnapInit(int slots)
     size = 0;
     p = getsectiondata(&_mh_execute_header, GE_SNAPSHOT_SEGMENT, "__bss", &size);
     if (p && size) s_R[s_NumR++] = (Range){ p, size, "globals(bss)" };
-    s_R[s_NumR++] = (Range){ (unsigned char *)(uintptr_t)PORT_DRAM_V1_BASE, PORT_DRAM_SIZE, "dram" };
+    {
+        unsigned char *d0 = (unsigned char *)(uintptr_t)PORT_DRAM_V1_BASE, *d1 = d0 + PORT_DRAM_SIZE;
+        /* the audio heap may be reported through either DRAM view */
+        unsigned char *x0 = s_ExclBase, *x1;
+        if (x0 >= (unsigned char *)(uintptr_t)PORT_DRAM_K0_BASE &&
+            x0 < (unsigned char *)(uintptr_t)PORT_DRAM_K0_BASE + PORT_DRAM_SIZE) {
+            x0 = d0 + (x0 - (unsigned char *)(uintptr_t)PORT_DRAM_K0_BASE);
+        }
+        x1 = x0 + s_ExclSize;
+        if (x0 && x0 >= d0 && x1 <= d1) {
+            s_R[s_NumR++] = (Range){ d0, (size_t)(x0 - d0), "dram" };
+            s_R[s_NumR++] = (Range){ x1, (size_t)(d1 - x1), "dram(after audio heap)" };
+            sysLogPrintf(LOG_NOTE, "snapshot: audio heap %p +%zu left out", (void *)x0, s_ExclSize);
+        } else {
+            s_R[s_NumR++] = (Range){ d0, PORT_DRAM_SIZE, "dram" };
+        }
+    }
     joyPortPlaybackData(&p, &n);
     s_R[s_NumR++] = (Range){ p, n, "contdata(playback)" };
 
@@ -161,6 +190,33 @@ size_t gesnapCompareLive(int slot, char *report, size_t cap)
     return diff;
 }
 
+/* Debug: writes every differing run between a slot and the live state as
+ * "address length range" lines (GE_SYNCTEST_DUMP, symbolize with atos). */
+void gesnapDumpDiff(int slot, const char *path)
+{
+    FILE *f;
+    size_t off = 0;
+    const unsigned char *a, *b;
+    if (!s_NumSlots || !s_Scratch || !path) return;
+    f = fopen(path, "w");
+    if (!f) return;
+    saveInto(s_Scratch);
+    a = s_Slots[slot % s_NumSlots].buf;
+    b = s_Scratch;
+    for (int r = 0; r < s_NumR; r++) {
+        for (size_t i = 0; i < s_R[r].size; i++) {
+            if (a[off + i] != b[off + i]) {
+                size_t j = i;
+                while (j < s_R[r].size && a[off + j] != b[off + j]) j++;
+                fprintf(f, "%p %zu %s\n", (void *)(s_R[r].base + i), j - i, s_R[r].name);
+                i = j;
+            }
+        }
+        off += s_R[r].size;
+    }
+    fclose(f);
+}
+
 double gesnapLastSaveMs(void) { return s_SaveMs; }
 double gesnapLastLoadMs(void) { return s_LoadMs; }
 size_t gesnapSize(void) { return s_Total; }
@@ -168,6 +224,7 @@ size_t gesnapSize(void) { return s_Total; }
 #else
 
 int gesnapSupported(void) { return 0; }
+void gesnapExcludeRange(void *p, unsigned long size) { (void)p; (void)size; }
 int gesnapInit(int slots) { (void)slots; return 0; }
 void gesnapSave(int slot) { (void)slot; }
 int gesnapLoad(int slot) { (void)slot; return 0; }
@@ -176,5 +233,6 @@ size_t gesnapCompareLive(int slot, char *report, size_t cap) { (void)slot; (void
 double gesnapLastSaveMs(void) { return 0; }
 double gesnapLastLoadMs(void) { return 0; }
 size_t gesnapSize(void) { return 0; }
+void gesnapDumpDiff(int slot, const char *path) { (void)slot; (void)path; }
 
 #endif
