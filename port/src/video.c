@@ -39,6 +39,10 @@ extern void exit(int status);
 #include "../fast3d/gfx_api.h"
 #include "../fast3d/gfx_sdl.h"
 #include "../fast3d/gfx_opengl.h"
+#if defined(GE_HAVE_METAL)
+extern struct GfxRenderingAPI gfx_metal_api;   /* port/fast3d/gfx_metal.mm */
+extern bool gfx_sdl_use_metal;                 /* port/fast3d/gfx_sdl2.cpp */
+#endif
 
 /* GE's internal resolution before the game's first osViSetMode (which then
  * sets the real CFB size): NTSC 640x480; PAL is taller, not shorter -- the EU
@@ -1122,6 +1126,9 @@ static void videoApplyFpsCap(void)
 
 int videoInterpHz(void)
 {
+#if defined(GE_HAVE_METAL)
+    if (gfx_sdl_use_metal) return 0;   /* interpolation present slots are GL-only */
+#endif
     return SDL_AtomicGet(&s_interpHzAtomic);
 }
 
@@ -1176,6 +1183,23 @@ int videoInit(void)
 
     wmAPI = &gfx_sdl;
     renderingAPI = &gfx_opengl_api;
+#if defined(GE_HAVE_METAL)
+    /* Metal: the only renderer on iOS (no desktop GL; GLES never reached the
+     * screen); on macOS GE_RENDERER=metal (test). No frame interpolation
+     * with Metal yet (its present slots are GL-only). */
+    {
+        const char *r = getenv("GE_RENDERER");
+#if defined(GE_IOS)
+        gfx_sdl_use_metal = true;
+#else
+        gfx_sdl_use_metal = (r && strcmp(r, "metal") == 0);
+#endif
+        if (gfx_sdl_use_metal) {
+            renderingAPI = &gfx_metal_api;
+            sysLogPrintf(LOG_NOTE, "video: Metal renderer");
+        }
+    }
+#endif
 
     gfx_current_native_viewport.width = GE_NATIVE_W;
     gfx_current_native_viewport.height = GE_NATIVE_H;

@@ -621,8 +621,21 @@ list(APPEND LIBS "${EXTRA_LIBRARIES}")
 # Port layer (shims + software RSP).
 file(GLOB_RECURSE SRC_PORT      "${CMAKE_SOURCE_DIR}/port/src/*.c")
 file(GLOB_RECURSE SRC_PORT_CXX  "${CMAKE_SOURCE_DIR}/port/src/*.cpp")
+# Metal renderer (port/fast3d/gfx_metal.mm): Apple clang builds only (GCC has no
+# Objective-C++ for the Apple frameworks). The iOS build is always clang.
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(GE_HAVE_METAL ON)
+  enable_language(OBJCXX)
+  add_compile_definitions(GE_HAVE_METAL=1)
+endif()
 file(GLOB_RECURSE SRC_FAST3D    "${CMAKE_SOURCE_DIR}/port/fast3d/*.cpp"
                                "${CMAKE_SOURCE_DIR}/port/fast3d/glad/*.c")
+if(GE_HAVE_METAL)
+  list(APPEND SRC_FAST3D "${CMAKE_SOURCE_DIR}/port/fast3d/gfx_metal.mm")
+  set_source_files_properties("${CMAKE_SOURCE_DIR}/port/fast3d/gfx_metal.mm" PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+else()
+  list(REMOVE_ITEM SRC_FAST3D "${CMAKE_SOURCE_DIR}/port/fast3d/gfx_metal_shader.cpp")
+endif()
 
 # Generated absolute ROM asset symbols for this region (see
 # scripts/gen_romassets.py). Defines every obseg/ramrom/music label and the
@@ -908,6 +921,9 @@ target_link_libraries(ge007 ${LIBS})
 # fingerprint refreshed at every build (cmake/NetBuildId.cmake) so only
 # identical builds connect.
 add_subdirectory(cmake/n64net "${CMAKE_BINARY_DIR}/n64net")
+if(GE_HAVE_METAL AND NOT GE_IOS)
+  target_link_libraries(ge007 "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+endif()
 if(GE_IOS)
   target_link_libraries(ge007 "${SDL2MAIN_LIBRARY}"
     "-framework UIKit" "-framework CoreGraphics" "-framework CoreMotion" "-framework GameController"
