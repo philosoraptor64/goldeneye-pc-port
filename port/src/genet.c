@@ -102,6 +102,12 @@ void inputNetPure(int on);                           /* port/src/input.c */
 
 static int s_Init = 0;
 static int s_Determ = 0;
+static int (*s_ExtSend)(const void *data, u32 size) = NULL;
+static int (*s_ExtRecv)(void *buf, u32 cap) = NULL;
+static int s_HostPaced = 0;
+static int s_ExtPeerAway = 0;
+static void startSession(void);
+static int externalTest(const char *role);
 static s32 s_Step = 1;
 static u32 s_BotMask = 0;
 static long s_BotFrom = 0;    /* GE_NET_BOT_FROM: the bot starts at this tick */
@@ -359,6 +365,7 @@ static void sleepUntilUs(uint64_t t)
 
 static void genetPace(void)
 {
+    if (s_HostPaced) return;   /* i64 calls the frames at 60 Hz */
     uint64_t now = sysGetMicroseconds();
     uint64_t period = GENET_TICK_US * (uint64_t)s_Step;
 
@@ -373,6 +380,19 @@ static void genetPace(void)
 
 /* ---- network ---------------------------------------------------------- */
 
+/* i64 (genetInitExternal): the host app's game channel replaces our socket */
+
+static void rawSend(const void *data, unsigned size)
+{
+    if (s_ExtSend) s_ExtSend(data, size);
+    else gnt_send(data, size);
+}
+
+static int rawRecv(void *buf, unsigned cap)
+{
+    return s_ExtRecv ? s_ExtRecv(buf, cap) : gnt_recv(buf, cap);
+}
+
 static void sendHandshake(u8 type)
 {
     u8 buf[32];
@@ -381,7 +401,7 @@ static void sendHandshake(u8 type)
     buf[4] = type;
     memcpy(buf + 5, GENET_BUILD_ID, 12);
     put64(buf + 17, s_Seed);
-    gnt_send(buf, 25);
+    rawSend(buf, 25);
 }
 
 static void sendSave(u8 kind, int chunk)
@@ -393,9 +413,9 @@ static void sendSave(u8 kind, int chunk)
     buf[5] = (u8)chunk;
     if (kind == SAVE_DATA) {
         memcpy(buf + 8, s_HostEep + chunk * GENET_EEP_CHUNK, GENET_EEP_CHUNK);
-        gnt_send(buf, sizeof(buf));
+        rawSend(buf, sizeof(buf));
     } else {
-        gnt_send(buf, 8);
+        rawSend(buf, 8);
     }
 }
 
@@ -406,7 +426,7 @@ static int netPoll(void)
     u8 buf[1500];
 
     for (;;) {
-        int n = gnt_recv(buf, sizeof(buf));
+        int n = rawRecv(buf, sizeof(buf));
         if (n <= 0) break;
 
         if (n >= 8 && get32(buf) == SAVE_MAGIC) {
@@ -451,7 +471,7 @@ static int netPoll(void)
 static void netSend(void *user, const uint8_t *data, uint32_t size)
 {
     (void)user;
-    gnt_send(data, size);
+    rawSend(data, size);
 }
 
 static void netLogCb(const char *fmt, ...)
@@ -467,6 +487,7 @@ static void netLogCb(const char *fmt, ...)
 static int peerGone(void)
 {
     if (s_PeerLeft) return 1;
+    if (s_ExtPeerAway) return 0;   /* i64 says the other player's app is in the background */
     if (n64net_input_peer_away(s_Net)) return 0; /* its app is in the background: wait as long as it takes */
     return n64net_input_peer_silence_usecs(s_Net) > (unsigned long long)s_DropSecs * 1000000ull;
 }
@@ -494,6 +515,11 @@ int genetConnect(void)
     unsigned long long deadline, nextHello = 0;
 
     genetInit(); /* first: loads $S/netplay.cfg into the environment */
+    if ((s = envStr("GE_NET_EXTERNAL_TEST"))) {
+        if ((s = envStr("GE_NET_DROP_SECS"))) s_DropSecs = atoi(s) > 0 ? atoi(s) : 20;
+        if ((s = envStr("GE_NET_TEST_DESYNC"))) s_TestDesync = atoi(s);
+        return externalTest(envStr("GE_NET_EXTERNAL_TEST"));
+    }
     server = envStr("GE_NET_SERVER");
     peer = envStr("GE_NET_PEER");
     s_IsHost = envStr("GE_NET_HOST") && atoi(envStr("GE_NET_HOST")) != 0;
@@ -569,6 +595,14 @@ int genetConnect(void)
         /* answer the guest's save requests until its first input arrives (netPoll in the game loop) */
     }
 
+    startSession();
+    return 1;
+}
+
+/* both machines know the seed and save: the input exchange starts */
+static void startSession(void)
+{
+    const char *s;
     {
         n64net_input_config cfg;
         memset(&cfg, 0, sizeof(cfg));
@@ -597,10 +631,124 @@ int genetConnect(void)
     s_Online = 1;
     s_Determ = 1; /* online play is always fixed-step */
     inputNetPure(1);
-    netLog("connected as player %d (%s, input delay %u, seed %016llx)", s_Local + 1,
+    netLog("connected as player %d (%s, input delay %u, seed %016llx%s)", s_Local + 1,
            s_Rollback ? "rollback in matches, lockstep in menus" : "lockstep", n64net_input_get_delay(s_Net),
-           (unsigned long long)s_Seed);
-    return 1;
+           (unsigned long long)s_Seed, s_ExtSend ? ", through the host app" : "");
+}
+
+/* ---- i64: the host app owns the connection (n64_game.h) ----------------
+ * The session's host calls genetSessionBlob before every run and the host
+ * app delivers it reliably; every machine then calls genetInitExternal at
+ * game start (instead of genetConnect) and genetExternalEvent with the app's
+ * session events. */
+#define GESB_MAGIC 0x47455342u   /* 'GESB' */
+#define GESB_VERSION 1
+
+u32 genetSessionBlob(void *out, u32 cap)
+{
+    u8 *b = (u8 *)out;
+    const u32 size = 8 + GENET_EEP_SIZE;
+    if (cap < size) return 0;
+    put32(b, GESB_MAGIC);
+    put32(b + 4, GESB_VERSION);
+    portEepromCopy(b + 8);   /* the host's save: unlocks, MP options */
+    return size;
+}
+
+s32 genetInitExternal(const struct genetexternal *x)
+{
+    const u8 *b = (const u8 *)x->blob;
+    genetInit();
+    if (!x || !x->send || !x->recv || x->localplayer < 0 || x->localplayer > 1) return -1;
+    if (!b || x->blobsize < 8 + GENET_EEP_SIZE || get32(b) != GESB_MAGIC || get32(b + 4) != GESB_VERSION) {
+        netLog("i64: the session blob is missing or from another version");
+        return -1;
+    }
+    s_ExtSend = x->send;
+    s_ExtRecv = x->recv;
+    s_HostPaced = x->hostpaced != 0;
+    s_Local = x->localplayer;
+    s_IsHost = (s_Local == 0);
+    s_Seed = x->seed;
+    s_HaveSeed = 1;
+    memcpy(s_HostEep, b + 8, GENET_EEP_SIZE);
+    if (!s_IsHost) {
+        portEepromAdopt(s_HostEep);   /* the guest plays on the host's save, in memory */
+    }
+    startSession();
+    return 0;
+}
+
+void genetExternalEvent(s32 event)
+{
+    switch (event) {
+    case GENET_EXT_PEER_AWAY: s_ExtPeerAway = 1; break;
+    case GENET_EXT_PEER_BACK: s_ExtPeerAway = 0; break;
+    case GENET_EXT_PEER_LEFT:
+        if (!s_PeerLeft) netLog("i64: the other player left");
+        s_PeerLeft = 1;
+        break;
+    default: break;
+    }
+}
+
+s32 genetHostPaced(void)
+{
+    return s_HostPaced;
+}
+
+/* GE_NET_EXTERNAL_TEST=host|guest: plays the host app's part over UDP so the
+ * pair test exercises genetInitExternal (GE_NET_EXTERNAL_BLOB=<file> carries
+ * the session blob, GE_NET_EXTERNAL_SEED the seed). */
+static int extTestSend(const void *data, u32 size) { gnt_send(data, size); return 0; }
+static int extTestRecv(void *buf, u32 cap)
+{
+    int n = gnt_recv(buf, cap);
+    if (n > 0 && !gnt_have_peer()) gnt_accept_last();   /* the host learns the guest's address */
+    return n;
+}
+
+static int externalTest(const char *role)
+{
+    static u8 blob[8 + GENET_EEP_SIZE];
+    struct genetexternal x;
+    const char *path = envStr("GE_NET_EXTERNAL_BLOB"), *s;
+    const int host = strcmp(role, "host") == 0;
+    int port = host ? 7501 : 7502;
+    u32 size = 0;
+    if ((s = envStr("GE_NET_PORT"))) port = atoi(s);
+    if (!path || gnt_open(port) != 0) return connectFail("external test: needs GE_NET_EXTERNAL_BLOB and a free port");
+    if (!host && gnt_set_peer(envStr("GE_NET_PEER") ? envStr("GE_NET_PEER") : "127.0.0.1:7501", 7501) != 0) {
+        return connectFail(gnt_error());
+    }
+    if (host) {
+        FILE *f = fopen(path, "wb");
+        size = genetSessionBlob(blob, sizeof(blob));
+        if (!f) return connectFail("external test: can't write the blob");
+        fwrite(blob, 1, size, f);
+        fclose(f);
+    } else {
+        unsigned long long deadline = gnt_now_us() + 30000000ull;
+        for (;;) {
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                size = (u32)fread(blob, 1, sizeof(blob), f);
+                fclose(f);
+                if (size == sizeof(blob)) break;
+            }
+            if (gnt_now_us() > deadline) return connectFail("external test: no session blob");
+            gnt_sleep_us(20000);
+        }
+    }
+    memset(&x, 0, sizeof(x));
+    x.localplayer = host ? 0 : 1;
+    x.seed = (s = envStr("GE_NET_EXTERNAL_SEED")) ? (u64)strtol(s, NULL, 0) : 0x1234;
+    x.blob = blob;
+    x.blobsize = size;
+    x.send = extTestSend;
+    x.recv = extTestRecv;
+    x.hostpaced = 0;
+    return genetInitExternal(&x) == 0;
 }
 
 void genetShutdown(void)
