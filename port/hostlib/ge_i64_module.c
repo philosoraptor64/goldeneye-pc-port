@@ -15,8 +15,12 @@
  * game's data folder as ge007.<region>.z64 and converted there by the native
  * converter (port/convert), stamped with GE_CONVERT_STAMP.
  *
- * Not yet: online runs (genet over i64's game channel), the session blob,
- * pause, title art.
+ * Online: genet's i64 path (genetSessionBlob / genetInitExternal /
+ * genetExternalEvent): the host's save travels in the session blob, inputs on
+ * i64's game channel; the game paces itself (its own threads).
+ * Pause: offline the game thread waits at its next frame; online genet's away
+ * handling holds and tells the other player.
+ * Not yet: title art.
  */
 #if defined(GE_I64_MODULE)
 
@@ -40,6 +44,21 @@ extern int geModuleStop(void);
 extern void audioSetHostOutput(void (*write)(const short *, unsigned, unsigned), unsigned (*buffered)(unsigned));
 extern char g_sysDataDir[1024];
 extern void *g_gfxExternalWindow;
+extern volatile int g_portHostPaused;   /* libultra.c */
+
+/* genet.h (game side), same layout */
+struct genetexternal {
+    int32_t localplayer;
+    uint64_t seed;
+    const void *blob;
+    uint32_t blobsize;
+    int (*send)(const void *data, uint32_t size);
+    int (*recv)(void *buf, uint32_t cap);
+    int32_t hostpaced;
+};
+extern struct genetexternal *g_geNetExternal;   /* main.c */
+extern uint32_t genetSessionBlob(void *out, uint32_t cap);
+extern void genetExternalEvent(int32_t event);
 
 /* Bump when the converter's output changes: older imports are redone. */
 #define GE_CONVERT_STAMP "ge-convert-1"
@@ -194,12 +213,21 @@ N64_GAME_EXPORT int n64_game_import_rom(const n64_host *host, const char *rom_pa
     return 0;
 }
 
+/* Online, on the session's host before a run: its save (unlocks, MP options).
+ * Reading the save touches the game's globals, so this runs between a
+ * pristine copy and a restore when no game is running. */
 N64_GAME_EXPORT uint32_t n64_game_session_blob(const n64_host *host, void *out, uint32_t cap)
 {
-    (void)host;
-    (void)out;
-    (void)cap;
-    return 0;   /* online runs not yet */
+    if (!host || !host->data_dir || !host->data_dir[0])
+        return 0;
+    reentrySavePristine();
+    if (sRunning) {
+        return genetSessionBlob(out, cap);
+    }
+    snprintf(g_sysDataDir, sizeof(g_sysDataDir), "%s", host->data_dir);
+    uint32_t n = genetSessionBlob(out, cap);
+    reentryRestorePristine();
+    return n;
 }
 
 /* ------------------------------------------------------------------ runs */
@@ -227,8 +255,9 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         snprintf(err, err_size, "i64 and this game module disagree on the interface version");
         return 1;
     }
-    if (launch->mode == N64_LAUNCH_ONLINE) {
-        snprintf(err, err_size, "online play isn't in the GoldenEye module yet");
+    if (launch->mode == N64_LAUNCH_ONLINE &&
+        (!host->net_send || !host->net_recv || launch->local_player > 1)) {
+        snprintf(err, err_size, "online needs i64's game channel and 2 players");
         return 1;
     }
     if (!host->data_dir || !host->data_dir[0]) {
@@ -257,6 +286,18 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
     snprintf(g_sysDataDir, sizeof(g_sysDataDir), "%s", host->data_dir);
     g_gfxExternalWindow = host->window;
     if (host->audio_write) audioSetHostOutput(hostAudioWrite, hostAudioBuffered);
+    static struct genetexternal ext;   /* reset with the globals after the run */
+    if (launch->mode == N64_LAUNCH_ONLINE) {
+        memset(&ext, 0, sizeof(ext));
+        ext.localplayer = (int32_t)launch->local_player;
+        ext.seed = launch->seed;
+        ext.blob = launch->session_blob;
+        ext.blobsize = launch->session_blob_size;
+        ext.send = host->net_send;
+        ext.recv = host->net_recv;
+        ext.hostpaced = 0;   /* the game's own threads keep its schedule */
+        g_geNetExternal = &ext;
+    }
     if (geModuleStart() != 0) {
         snprintf(err, err_size, "the game couldn't start (see ge007.log in its data folder)");
         /* partly started: undo what can be undone */
@@ -270,12 +311,17 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
 N64_GAME_EXPORT n64_frame_result n64_game_frame(void)
 {
     if (!sRunning) return N64_GAME_FRAME_EXIT;
+    if (sHost && sHost->net_poll_event) {
+        int ev;
+        while ((ev = sHost->net_poll_event()) != 0)
+            genetExternalEvent(ev);   /* same numbers: GENET_EXT_* = n64_net_event */
+    }
     return geModuleFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
 }
 
 N64_GAME_EXPORT void n64_game_set_paused(int paused)
 {
-    (void)paused;   /* not yet: the game keeps running behind i64's menu */
+    if (sRunning) g_portHostPaused = paused;
 }
 
 N64_GAME_EXPORT void n64_game_stop(void)

@@ -231,7 +231,18 @@ static int geMainOnce(int argc, char **argv, int mode, int cycle)
         snprintf(hl, sizeof(hl), "%s.%d", getenv("GE_SOAK_HASHLOG"), cycle);
         setenv("GE_NET_HASHLOG", hl, 1);
     }
-    genetConnect();
+    {
+        /* i64 module online: the host app's game channel (ge_i64_module.c) */
+        extern struct genetexternal *g_geNetExternal;
+        if (g_geNetExternal) {
+            if (genetInitExternal(g_geNetExternal) != 0) {
+                sysLogPrintf(LOG_ERROR, "i64: couldn't start the online session");
+                return 1;
+            }
+        } else {
+            genetConnect();
+        }
+    }
 
     /* 2. Load the ROM and map segments. */
     if (romdataInit() != 0) {
@@ -396,6 +407,10 @@ int main(int argc, char **argv)
     }
     return 0;
 }
+
+/* i64 module online: set by ge_i64_module.c before geModuleStart (reset with
+ * the globals after every run) */
+struct genetexternal *g_geNetExternal = NULL;
 
 /* ---- i64 module (port/hostlib/ge_i64_module.c) ----
  * The caller has already taken the pristine copy (reentrySavePristine) and

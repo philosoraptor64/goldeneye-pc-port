@@ -200,6 +200,8 @@ static int g_pqCount = 0;
  * their next blocking point once g_portQuit is set; other threads (SDL's
  * audio callback, the host) just see a failed non-blocking result. */
 volatile int g_portQuit = 0;
+/* i64 n64_game_set_paused: 1 = this player is in i64's menu, 2 = the friend */
+volatile int g_portHostPaused = 0;
 static __thread int t_isPortThread = 0;
 static pthread_t s_tickTh, s_rwTh;
 static int s_tickStarted = 0, s_rwStarted = 0;
@@ -785,7 +787,15 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
     /* gfxFrameMsgQ is consumed only by boss.c's game thread. Apply queued
      * F10 watch edits there, after releasing the OS queue lock; the SDL
      * input/scheduler and render threads never touch GE watch/save state. */
-    if (mq == &gfxFrameMsgQ) watchSettingsGameTick();
+    if (mq == &gfxFrameMsgQ) {
+        watchSettingsGameTick();
+        /* i64: the player is in i64's menu. Offline the game thread waits here,
+         * once per frame (online, genet's away handling holds and tells the
+         * other player). */
+        extern int genetOnline(void);
+        while (g_portHostPaused && !genetOnline() && !portQuitting())
+            sysSleep(10000);
+    }
     return 0;
 }
 

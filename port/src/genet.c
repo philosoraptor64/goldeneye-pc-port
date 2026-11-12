@@ -445,7 +445,7 @@ static int netPoll(void)
                 if (!s_PeerLeft && s_Online) netLog("the other player quit");
                 s_PeerLeft = 1;
             } else if (s_IsHost && buf[4] == HS_HELLO) {
-                gnt_accept_last();
+                if (!s_ExtSend) gnt_accept_last();   /* own socket: learn the guest's address */
                 if (!same) {
                     sendHandshake(HS_MISMATCH);
                     netLog("the guest has a different build (%.12s, this is %s)", (const char *)(buf + 5), GENET_BUILD_ID);
@@ -637,6 +637,47 @@ static void startSession(void)
            (unsigned long long)s_Seed, s_ExtSend ? ", through the host app" : "");
 }
 
+/* i64 without a session blob: HELLO/WELCOME (build check, the host's seed)
+ * and the host's save in chunks, over the host app's channel (s_ExtSend).
+ * Returns 0, or -1 (logged) on a mismatch or timeout. */
+static int channelHandshake(void)
+{
+    const char *s;
+    unsigned long long deadline, nextHello = 0;
+    if ((s = envStr("GE_NET_WAIT_SECS"))) s_WaitSecs = atoi(s);
+    if (s_IsHost) portEepromCopy(s_HostEep);
+    deadline = gnt_now_us() + (unsigned long long)(s_WaitSecs > 0 ? s_WaitSecs : 30) * 1000000ull;
+    netLog("i64: %s over the host app's channel, build %s", s_IsHost ? "hosting" : "joining", GENET_BUILD_ID);
+    for (;;) {
+        unsigned long long now;
+        if (netPoll()) break;
+        if (s_Mismatch) { netLog("Netplay: the other player has a different build of the game"); return -1; }
+        now = gnt_now_us();
+        if (now > deadline) { netLog("Netplay: the other player didn't connect in time"); return -1; }
+        if (!s_IsHost && now >= nextHello) {
+            sendHandshake(HS_HELLO);
+            nextHello = now + 100000;
+        }
+        gnt_sleep_us(1000);
+    }
+    if (!s_IsHost) {
+        unsigned long long next = 0;
+        deadline = gnt_now_us() + 10000000ull;
+        while (s_EepChunks != (1u << GENET_EEP_CHUNKS) - 1) {
+            unsigned long long now = gnt_now_us();
+            netPoll();
+            if (now > deadline || s_PeerLeft) { netLog("Netplay: didn't receive the host's save data"); return -1; }
+            if (now >= next) {
+                sendSave(SAVE_REQ, 0);
+                next = now + 100000;
+            }
+            gnt_sleep_us(1000);
+        }
+        portEepromAdopt(s_HostEep);
+    }
+    return 0;
+}
+
 /* ---- i64: the host app owns the connection (n64_game.h) ----------------
  * The session's host calls genetSessionBlob before every run and the host
  * app delivers it reliably; every machine then calls genetInitExternal at
@@ -658,11 +699,12 @@ u32 genetSessionBlob(void *out, u32 cap)
 
 s32 genetInitExternal(const struct genetexternal *x)
 {
-    const u8 *b = (const u8 *)x->blob;
+    const u8 *b = x ? (const u8 *)x->blob : NULL;
     genetInit();
     if (!x || !x->send || !x->recv || x->localplayer < 0 || x->localplayer > 1) return -1;
-    if (!b || x->blobsize < 8 + GENET_EEP_SIZE || get32(b) != GESB_MAGIC || get32(b + 4) != GESB_VERSION) {
-        netLog("i64: the session blob is missing or from another version");
+    const int blobOk = b && x->blobsize >= 8 + GENET_EEP_SIZE && get32(b) == GESB_MAGIC && get32(b + 4) == GESB_VERSION;
+    if (b && x->blobsize && !blobOk) {
+        netLog("i64: the session blob is from another version");
         return -1;
     }
     s_ExtSend = x->send;
@@ -672,6 +714,17 @@ s32 genetInitExternal(const struct genetexternal *x)
     s_IsHost = (s_Local == 0);
     s_Seed = x->seed;
     s_HaveSeed = 1;
+    if (!blobOk) {
+        /* no session blob (i64 doesn't deliver one yet): the same handshake
+         * and save transfer as genetConnect, over the host app's channel */
+        if (channelHandshake() != 0) {
+            s_ExtSend = NULL;
+            s_ExtRecv = NULL;
+            return -1;
+        }
+        startSession();
+        return 0;
+    }
     memcpy(s_HostEep, b + 8, GENET_EEP_SIZE);
     if (!s_IsHost) {
         portEepromAdopt(s_HostEep);   /* the guest plays on the host's save, in memory */
@@ -1211,7 +1264,8 @@ static int awayNow(void)
         until = gnt_now_us() + (unsigned long long)secs * 1000000ull;
     }
     if (until && gnt_now_us() < until) return 1;
-    return gfx_sdl_app_inactive;
+    extern volatile int g_portHostPaused;   /* i64: this player went back to i64's menu */
+    return gfx_sdl_app_inactive || g_portHostPaused == 1;
 }
 
 static void holdWhileAway(void)
@@ -1228,7 +1282,8 @@ static void holdWhileAway(void)
     s_AwaySent = 1;
     for (int i = 0; i < 3; i++) n64net_input_set_away(s_Net, 1);
     netLog("away (app in the background): the game waits");
-    while (awayNow() && !s_PeerLeft) {
+    extern volatile int g_portQuit;   /* re-entry shutdown: let the thread reach a blocking point */
+    while (awayNow() && !s_PeerLeft && !g_portQuit) {
         netPoll();
         n64net_input_resend(s_Net);
         gnt_sleep_us(10000);

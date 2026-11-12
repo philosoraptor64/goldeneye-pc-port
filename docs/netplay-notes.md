@@ -228,4 +228,12 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
   io.github.philosoraptor.i64`: import from the ROM on the phone, run, stop (threads 16 ms), run again, quit;
   window reserved at load (0x3_0000_0000), Metal on the A16, audio through i64, footprint 24 -> 30 MB per run.
   Not yet seen by eye or played with a controller.
-- Not yet: online (genet over i64's game channel), pause (set_paused), session blob.
+- **Online through i64 (Mac pair test, 2026-11-12):** `genetInitExternal` on i64's game channel; i64 doesn't deliver
+  session blobs yet, so without one genet runs its own handshake over the channel (`channelHandshake`: HELLO/WELCOME
+  build check + the host's save in chunks). `n64_game_frame` forwards i64's session events (PEER_AWAY/BACK/LEFT).
+  `SEQ="ge007-us:2400" EXTRA_ENV="GE_NET_BOT=1" i64/scripts/pair-test.sh` (data folders with the module + game
+  data): connected as players 1/2 with i64's seed, **60/60 sync checks matched both sides**, rtt 8 ms. Host stalled
+  7.8 s over 30 s (guest 0): to look at (probably the host waiting while the guest boots).
+- **Pause:** `n64_game_set_paused` -> `g_portHostPaused`. Offline the game thread waits at its per-frame
+  gfxFrameMsgQ receive (port layer); online genet's away handling (awayNow) holds and tells the other player. Both
+  give way to the re-entry shutdown. Tested: `I64_TEST_PAUSE=300:3` offline, resume, stop.
