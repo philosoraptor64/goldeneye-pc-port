@@ -4,6 +4,9 @@
  * Modelled on the PD port's port/src/system.c.
  */
 
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 #include "reentry.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +71,10 @@ uintptr_t sysImageBase(void)
      * there is no fixed base: arm64 is PIE-only (and `-image_base` is ignored),
      * so this is 0x1_0000_0000 + a per-run ASLR slide. M1's image-relative
      * address rule uses this; get the slide from _dyld_get_image_vmaddr_slide. */
+    /* this image's own header: the app, or the i64 module dylib */
+    Dl_info info;
+    if (dladdr((const void *)&sysImageBase, &info) && info.dli_fbase)
+        return (uintptr_t)info.dli_fbase;
     return (uintptr_t)_dyld_get_image_header(0);
 #else
     /* TODO: parse /proc/self/maps for the first executable mapping. */
@@ -415,6 +422,9 @@ const char *sysGetExeDir(void)
  *     executable (so running build-pc/ge007.*.exe from anywhere finds
  *     ./data/ when run from the repo root).
  */
+/* i64 module: $S = this folder (n64_host.data_dir) when set */
+char g_sysDataDir[1024] = "";
+
 const char *sysResolvePath(const char *path)
 {
     static char out[1024];
@@ -438,6 +448,11 @@ const char *sysResolvePath(const char *path)
 #else
         snprintf(out, sizeof(out), "./%s", path + 3);
 #endif
+        return out;
+    }
+    if (!strncmp(path, "$S/", 3) && g_sysDataDir[0]) {
+        /* i64 module: the host's per-game data folder */
+        snprintf(out, sizeof(out), "%s/%s", g_sysDataDir, path + 3);
         return out;
     }
     if (!strncmp(path, "$S/", 3)) {

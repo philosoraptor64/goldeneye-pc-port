@@ -21,6 +21,10 @@ extern "C" void videoRequestQuit(const char *why);   // port/src/video.c (D344)
 extern "C" void inputRequestRescan(void);   // port/src/input.c (D450)
 
 static SDL_Window* wnd;
+/* i64 module: the host's window (n64_host.window). The game makes only its own
+ * Metal view on it and never resizes, moves, retitles or destroys it. */
+extern "C" void *g_gfxExternalWindow;
+void *g_gfxExternalWindow = nullptr;
 static SDL_GLContext ctx;
 static SDL_Renderer* renderer;
 static int sdl_to_lus_table[512];
@@ -134,6 +138,7 @@ static bool exclusive_mode_chosen = false;
 
 static void set_fullscreen(bool on, bool call_callback) {
     fullscreen_state = on;
+    if (g_gfxExternalWindow) return;
     /* D639: exclusive fullscreen switches the monitor to the window's display
      * mode; with none set, SDL derives it from the current WINDOW size, so a
      * 1440x1080 window asked the monitor for ~1440x1080 instead of its desktop
@@ -155,6 +160,7 @@ static void set_fullscreen(bool on, bool call_callback) {
 
 static void set_maximize_window(bool on) {
 	maximized_state = on;
+	if (g_gfxExternalWindow) return;
 	if (on) {
 		SDL_MaximizeWindow(wnd);
 	} else {
@@ -277,9 +283,13 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
 
     SDL_AddEventWatch(gfx_sdl_app_event_watch, NULL);
     bool metal_ok = false;
+    if (g_gfxExternalWindow) {
+        gfx_sdl_use_metal = true;   /* the host window is a Metal window (i64) */
+    }
     if (gfx_sdl_use_metal) {
         Uint32 mflags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_METAL;
-        wnd = SDL_CreateWindow(set->title, posX, posY, window_width, window_height, mflags);
+        wnd = g_gfxExternalWindow ? (SDL_Window *)g_gfxExternalWindow
+                                  : SDL_CreateWindow(set->title, posX, posY, window_width, window_height, mflags);
         if (wnd) {
             metal_view = SDL_Metal_CreateView(wnd);
             if (metal_view) {
@@ -287,7 +297,7 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
                 sysLogPrintf(LOG_NOTE, "SDL: created Metal window");
             } else {
                 sysLogPrintf(LOG_WARNING, "SDL: could not create Metal view: %s", SDL_GetError());
-                SDL_DestroyWindow(wnd);
+                if (!g_gfxExternalWindow) SDL_DestroyWindow(wnd);
                 wnd = nullptr;
             }
         } else {
@@ -388,7 +398,7 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
                     *(Uint32 *)((Uint8 *)icon->pixels + y * icon->pitch + x * 4) = v;
                 }
             }
-            SDL_SetWindowIcon(wnd, icon);
+            if (!g_gfxExternalWindow) SDL_SetWindowIcon(wnd, icon);
             SDL_FreeSurface(icon);
         } else {
             sysLogPrintf(LOG_NOTE, "SDL: could not create the window icon surface: %s", SDL_GetError());
@@ -466,6 +476,7 @@ static void gfx_sdl_get_centered_positions(int32_t width, int32_t height, int32_
 
 static void gfx_sdl_set_closest_resolution(int32_t width, int32_t height, bool should_center) {
     const SDL_DisplayMode mode = {.w = width, .h = height};
+    if (g_gfxExternalWindow) return;
     const int disp_idx = SDL_GetWindowDisplayIndex(wnd);
     SDL_DisplayMode closest = {};
     if (SDL_GetClosestDisplayMode(disp_idx, &mode, &closest)) {
@@ -482,6 +493,7 @@ static void gfx_sdl_set_closest_resolution(int32_t width, int32_t height, bool s
 }
 
 static void gfx_sdl_set_dimensions(uint32_t width, uint32_t height, int32_t posX, int32_t posY) {
+    if (g_gfxExternalWindow) return;
     SDL_SetWindowSize(wnd, width, height);
     SDL_SetWindowPosition(wnd, posX, posY);
 }
@@ -600,9 +612,10 @@ extern "C" void gfx_sdl_teardown_for_exit(void) {
         metal_view = NULL;
     }
     if (wnd) {
-        SDL_DestroyWindow(wnd);
+        if (!g_gfxExternalWindow) SDL_DestroyWindow(wnd);   /* i64 owns its window */
         wnd = NULL;
     }
+    SDL_DelEventWatch(gfx_sdl_app_event_watch, NULL);   /* re-added by the next init */
 }
 
 /* Release the GL context from the calling (host main) thread. WGL only allows
@@ -744,6 +757,7 @@ static void *gfx_sdl_get_window_handle(void) {
 }
 
 static void gfx_sdl_set_window_title(const char *title) {
+    if (g_gfxExternalWindow) return;
     SDL_SetWindowTitle(wnd, title);
 }
 

@@ -1192,7 +1192,8 @@ int videoInit(void)
 #if defined(GE_IOS)
         gfx_sdl_use_metal = true;
 #else
-        gfx_sdl_use_metal = (r && strcmp(r, "metal") == 0);
+        extern void *g_gfxExternalWindow;   /* i64 module: the host's Metal window */
+        gfx_sdl_use_metal = (r && strcmp(r, "metal") == 0) || g_gfxExternalWindow != NULL;
 #endif
         if (gfx_sdl_use_metal) {
             renderingAPI = &gfx_metal_api;
@@ -1355,9 +1356,13 @@ void videoTeardownForExit(void)
 }
 
 /* Host thread: exit once the render thread is out of the GL driver. */
+/* i64 module / soak: the host process must survive a quit request; the
+ * embedder sees videoQuitRequested() and stops the game itself. */
+int g_videoNoExit = 0;
+
 static void videoHostExitIfRequested(void)
 {
-    if (!SDL_AtomicGet(&s_quitReq)) {
+    if (!SDL_AtomicGet(&s_quitReq) || g_videoNoExit) {
         return;
     }
     Uint32 start = SDL_GetTicks();

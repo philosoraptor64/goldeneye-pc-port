@@ -224,6 +224,13 @@ endif()
 # G3: native ROM sidecar converter (port/convert, C port of tools_pc/d43/d69/
 # d88). Added here, before the game's global include paths and compile options
 # (they shadow <stdio.h>/<zlib.h> and force-include versioninfo.h).
+# i64 module: the game as a shared library exporting only n64_game_*
+# (port/hostlib/ge_i64_module.c, port/i64/n64_game.h); i64 provides SDL, the
+# window and the audio output.
+option(GE_I64_MODULE "Build the game as an i64 module (libge007_i64.dylib)" OFF)
+if(GE_I64_MODULE)
+  add_compile_definitions(GE_I64_MODULE=1)
+endif()
 add_subdirectory(port/convert)
 add_subdirectory(port/hostlib)
 
@@ -951,7 +958,12 @@ endif()
 # Target
 # ----------------------------------------------------------------------------
 set(BIN_NAME "ge007${BIN_REGION}.${TARGET_ARCH}")
-add_executable(ge007 ${SRC})
+if(GE_I64_MODULE)
+  add_library(ge007 SHARED ${SRC} $<TARGET_OBJECTS:ge007_i64glue>)
+  target_link_options(ge007 PRIVATE "-Wl,-exported_symbols_list,${CMAKE_SOURCE_DIR}/port/i64/exports.txt")
+else()
+  add_executable(ge007 ${SRC})
+endif()
 target_link_libraries(ge007 ${LIBS})
 
 # Netplay (port/src/genet.c): n64net's input ledger + rendezvous, and a build
@@ -961,7 +973,12 @@ add_subdirectory(cmake/n64net "${CMAKE_BINARY_DIR}/n64net")
 if(GE_HAVE_METAL AND NOT GE_IOS)
   target_link_libraries(ge007 "-framework Metal" "-framework QuartzCore" "-framework Foundation")
 endif()
-if(GE_IOS)
+if(GE_IOS AND GE_I64_MODULE)
+  # i64 embeds the module as a framework-less dylib and provides SDL
+  target_link_libraries(ge007
+    "-framework UIKit" "-framework CoreGraphics" "-framework GameController" "-framework AVFoundation"
+    "-framework AudioToolbox" "-framework QuartzCore" "-framework Metal" "-framework Foundation")
+elseif(GE_IOS)
   target_link_libraries(ge007 "${SDL2MAIN_LIBRARY}"
     "-framework UIKit" "-framework CoreGraphics" "-framework CoreMotion" "-framework GameController"
     "-framework CoreHaptics" "-framework AVFoundation" "-framework AudioToolbox" "-framework CoreAudio"
@@ -984,8 +1001,15 @@ add_custom_target(ge_net_build_id ALL
   BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/genet_build_id.h
   COMMENT "Netplay build fingerprint")
 add_dependencies(ge007 ge_net_build_id)
+if(GE_I64_MODULE)
+  add_dependencies(ge007_i64glue ge_net_build_id)
+endif()
 target_include_directories(ge007 PRIVATE ${CMAKE_BINARY_DIR}/generated)
-set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
+if(GE_I64_MODULE)
+  set_target_properties(ge007 PROPERTIES OUTPUT_NAME "ge007_i64")
+else()
+  set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
+endif()
 if(WIN32)
   set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)
   # Explorer/taskbar icon: the original crosshair mark (cmake/icon/ge007.rc,

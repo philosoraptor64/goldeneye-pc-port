@@ -71,6 +71,9 @@ void gesnapExcludeRange(void *p, unsigned long size)
     s_ExclSize = (size_t)size;
 }
 
+/* this image (the app, or the i64 module dylib) */
+extern const char __dso_handle;
+
 int gesnapInit(int slots)
 {
     unsigned long size = 0;
@@ -78,10 +81,10 @@ int gesnapInit(int slots)
     size_t n;
 
     s_NumR = 0;
-    p = getsectiondata(&_mh_execute_header, GE_SNAPSHOT_SEGMENT, "__data", &size);
+    p = getsectiondata((const struct mach_header_64 *)&__dso_handle, GE_SNAPSHOT_SEGMENT, "__data", &size);
     if (p && size) s_R[s_NumR++] = (Range){ p, size, "globals(data)" };
     size = 0;
-    p = getsectiondata(&_mh_execute_header, GE_SNAPSHOT_SEGMENT, "__bss", &size);
+    p = getsectiondata((const struct mach_header_64 *)&__dso_handle, GE_SNAPSHOT_SEGMENT, "__bss", &size);
     if (p && size) s_R[s_NumR++] = (Range){ p, size, "globals(bss)" };
     {
         unsigned char *d0 = (unsigned char *)(uintptr_t)PORT_DRAM_V1_BASE, *d1 = d0 + PORT_DRAM_SIZE;

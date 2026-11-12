@@ -196,3 +196,24 @@ GE_RSEED=<hex>`) writes each cycle's state hashes to `<base>.<i>`.
 - No ge007.ini save in soak mode (it would write the restored defaults).
 - Result (Mac, GL): 3 x 300 frames, threads stop in ~17 ms, 7 threads after each cycle, **per-cycle hash logs
   identical** (300 distinct hashes). Footprint grows ~17 MB/cycle (renderer caches/GL objects not freed yet).
+
+## i64 module (MacBook, 2026-11-12)
+`-DGE_I64_MODULE=ON` builds `libge007_i64.dylib` exporting only `n64_game_*` (port/i64/exports.txt;
+glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac:
+`cmake -S . -B build-mac-module -G Ninja -DGE_I64_MODULE=ON -DROMID=ntsc-final -DCMAKE_C_COMPILER=clang
+-DCMAKE_CXX_COMPILER=clang++ -DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)`, then i64's
+`scripts/install-module.sh build-mac-module/libge007_i64.dylib`.
+- The game keeps its own threads (N64 threads, tick, render worker) and renders by itself
+  (N64_GAME_INFO_OWN_THREAD); `n64_game_frame()` only pumps SDL events on i64's main thread.
+- Window: i64's SDL Metal window (`g_gfxExternalWindow`): the game adds/removes only its own Metal view and never
+  resizes, moves, retitles or destroys it; Metal is forced. Audio: i64's audio_write/audio_buffered (22050 Hz).
+  Data: `$S` = n64_host.data_dir (`g_sysDataDir`). No crash handler, no exit() on quit (`g_videoNoExit`).
+- The address window is reserved by a constructor when i64 loads the module (at launch, before i64's heap can take
+  it: matters on the iPhone, 0x3_0000_0000); image-relative pointers use the module's own header (dladdr).
+- ROM import: the ROM (any byte order) is saved big-endian as `ge007.<region>.z64` in data_dir and converted
+  natively; stamp `ge007.convert` = GE_CONVERT_STAMP (bump when the converter's output changes).
+- Stop = the R1 shutdown + globals restore. Tested on the Mac: `I64_DATA_DIR=<d> I64_ROM_DIR=<ROMs>
+  I64_TEST_BACKGROUND=1 I64_TEST_GAME=ge007-us I64_TEST_GAME_FRAMES=300 I64_TEST_GAME_RUNS=2 I64_TEST_GAME_QUIT=1
+  i64.app/Contents/MacOS/i64`: import from the ROM, run, stop, run again, quit, all clean.
+- Not yet: online (genet over i64's game channel), pause, session blob, iOS module build, the Metal renderer's
+  ~37 MB/run leak (GL is flat).

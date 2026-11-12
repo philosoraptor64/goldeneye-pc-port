@@ -39,6 +39,7 @@
 #define mach_vm_address_t vm_address_t
 #define mach_vm_size_t vm_size_t
 #define mach_vm_map vm_map
+#define mach_vm_deallocate vm_deallocate
 #endif
 
 uintptr_t g_portImageBase = 0;
@@ -48,6 +49,18 @@ int g_portUseImageRel = 0;
 /* R1: the regions stay reserved across re-entry cycles (portAddrResetWindow
  * swaps their contents for fresh reservations); survives the globals reset. */
 GE_KEEP static int s_windowReserved = 0;
+
+#if PORT_ADDR_BASE != 0
+/* Only the regions the port maps (portaddr.h), not the whole 4 GiB window:
+ * the rest is never touched, so the OS keeps it. */
+static const struct { unsigned long long off, size; const char *what; } kPortRegions[] = {
+    { PORT_CART_OFF,          PORT_CART_RESERVE,      "cart (ROM + sidecars)" },
+    { 0x70000000ULL,          PORT_DRAM_SIZE,         "DRAM" },
+    { 0x80000000ULL,          PORT_DRAM_SIZE,         "DRAM KSEG0 mirror" },
+    { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE, "thread stacks" },
+};
+#define PORT_NREGIONS ((int)(sizeof(kPortRegions) / sizeof(kPortRegions[0])))
+#endif
 
 /* Defined by port/src/dram_syms*.s; must equal PORT_ADDR_BASE + 0x70000000. */
 extern unsigned char cfb_16[];
@@ -191,14 +204,7 @@ void portAddrInit(void)
         /* Non-clobbering: VM_FLAGS_FIXED without VM_FLAGS_OVERWRITE fails with
          * KERN_NO_SPACE if the range is already in use, rather than silently
          * replacing a live mapping (mmap MAP_FIXED on macOS does the latter). */
-        /* Only the regions the port maps (portaddr.h), not the whole 4 GiB
-         * window: the rest is never touched, so the OS keeps it. */
-        static const struct { unsigned long long off, size; const char *what; } regions[] = {
-            { PORT_CART_OFF,          PORT_CART_RESERVE,      "cart (ROM + sidecars)" },
-            { 0x70000000ULL,          PORT_DRAM_SIZE,         "DRAM" },
-            { 0x80000000ULL,          PORT_DRAM_SIZE,         "DRAM KSEG0 mirror" },
-            { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE, "thread stacks" },
-        };
+#define regions kPortRegions
         unsigned long long total = 0;
         for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
             mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
@@ -215,7 +221,8 @@ void portAddrInit(void)
             total += regions[i].size;
         }
         sysLogPrintf(LOG_INFO, "portAddr: reserved %llu MB of address space in %d regions",
-                     total >> 20, (int)(sizeof(regions) / sizeof(regions[0])));
+                     total >> 20, PORT_NREGIONS);
+#undef regions
         s_windowReserved = 1;
     } else {
         sysLogPrintf(LOG_INFO, "portAddr: window still reserved (re-entry)");
@@ -253,12 +260,7 @@ void portAddrInit(void)
 void portAddrResetWindow(void)
 {
 #if PORT_ADDR_BASE != 0
-    static const struct { unsigned long long off, size; } regions[] = {
-        { PORT_CART_OFF,          PORT_CART_RESERVE },
-        { 0x70000000ULL,          PORT_DRAM_SIZE },
-        { 0x80000000ULL,          PORT_DRAM_SIZE },
-        { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE },
-    };
+#define regions kPortRegions
     for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
         mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
         kern_return_t kr = mach_vm_map(mach_task_self(), &addr, (mach_vm_size_t)regions[i].size, 0,
@@ -267,5 +269,29 @@ void portAddrResetWindow(void)
         if (kr != KERN_SUCCESS)
             sysFatalError("portAddr: cannot reset region %d (%s)", (int)i, mach_error_string(kr));
     }
+#undef regions
 #endif
 }
+
+#if defined(GE_I64_MODULE) && PORT_ADDR_BASE != 0
+/* i64 module: reserve the window when i64 loads the module (it does that when
+ * it lists its games at launch), before the app's own heap can grow into it
+ * (on an iPhone the only base that fits sits right above the heap). On
+ * failure nothing stays reserved and portAddrInit reports it at start. */
+__attribute__((constructor)) static void portAddrReserveAtLoad(void)
+{
+    for (int i = 0; i < PORT_NREGIONS; i++) {
+        mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + kPortRegions[i].off);
+        kern_return_t kr = mach_vm_map(mach_task_self(), &addr, (mach_vm_size_t)kPortRegions[i].size, 0,
+                                       VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
+                                       VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+        if (kr != KERN_SUCCESS || addr != (mach_vm_address_t)(PORT_ADDR_BASE + kPortRegions[i].off)) {
+            for (int j = 0; j < i; j++)
+                mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)(PORT_ADDR_BASE + kPortRegions[j].off),
+                                   (mach_vm_size_t)kPortRegions[j].size);
+            return;
+        }
+    }
+    s_windowReserved = 1;
+}
+#endif

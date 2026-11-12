@@ -90,6 +90,21 @@ static u32  oversizeCount = 0;
 /* D470: open the configured device by name (NULL name = system default).
  * A named device that cannot be opened logs a warning and falls back to the
  * default, so a missing/removed interface never leaves the game silent. */
+/* i64 module: game audio goes to the host (n64_host.audio_write /
+ * audio_buffered) instead of an SDL device. */
+static void (*s_hostAudioWrite)(const short *stereo, unsigned frames, unsigned rate);
+static unsigned (*s_hostAudioBuffered)(unsigned rate);
+void audioSetHostOutput(void (*write)(const short *, unsigned, unsigned), unsigned (*buffered)(unsigned))
+{
+    s_hostAudioWrite = write;
+    s_hostAudioBuffered = buffered;
+}
+static u32 audioQueuedBytes(void)
+{
+    if (s_hostAudioWrite) return s_hostAudioBuffered ? s_hostAudioBuffered(22050) * 4u : 0u;
+    return dev ? SDL_GetQueuedAudioSize(dev) : 0;
+}
+
 static SDL_AudioDeviceID audioOpenConfigured(const char *name, SDL_AudioSpec *have)
 {
     SDL_AudioSpec want = {0};
@@ -152,6 +167,10 @@ void audioNotifyDeviceRemoved(u32 which)
 
 int audioInit(void)
 {
+    if (s_hostAudioWrite) {
+        sysLogPrintf(LOG_INFO, "audioInit: output through the host (i64), 22050 Hz stereo");
+        return 0;
+    }
 #if defined(_WIN32) && defined(SDL_HINT_AUDIODRIVER)
     /* D322: prefer DirectSound over SDL2's WASAPI backend on Windows. Measured
      * side by side on the same USB interface (tools_pc/sdl_drain_monitor.c,
@@ -192,7 +211,7 @@ void audioDestroy(void)
 
 s32 audioGetSamplesBuffered(void)
 {
-    return dev ? (SDL_GetQueuedAudioSize(dev) / 4) : 0;
+    return (s32)(audioQueuedBytes() / 4);
 }
 
 /*
@@ -221,7 +240,7 @@ s32 audioGetSamplesBuffered(void)
  */
 u32 audioGetAiLengthBytes(void)
 {
-    u32 queued = dev ? SDL_GetQueuedAudioSize(dev) : 0;
+    u32 queued = audioQueuedBytes();
 
     /* D204/F5 -- shift the regulator's setpoint off zero. THIS is the part
      * that measurably changes behaviour.
@@ -258,6 +277,7 @@ u32 audioGetAiLengthBytes(void)
  * audio of the old device is dropped (a few tens of ms at most). */
 static void audioServiceDeviceRequests(void)
 {
+    if (s_hostAudioWrite) return;   /* i64 owns the output */
     int removed = SDL_AtomicSet(&s_devRemovedId, 0);
     if (removed && dev && (SDL_AudioDeviceID)removed == dev) {
         sysLogPrintf(LOG_WARNING,
@@ -441,9 +461,10 @@ void audioSetNextBuffer(const s16 *buf, u32 len)
         }
     }
 
-    if (dev && buf && len) {
+    if ((dev || s_hostAudioWrite) && buf && len) {
         if (audioGetSamplesBuffered() < queueLimit) {
-            SDL_QueueAudio(dev, buf, len);
+            if (s_hostAudioWrite) s_hostAudioWrite(buf, len / 4u, 22050);
+            else SDL_QueueAudio(dev, buf, len);
             lastBufferBytes = len;
         } else if (dropCount++ % 128 == 0) {
             /* D204/F3: dropping here used to be silent, so overproduction

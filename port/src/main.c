@@ -139,12 +139,18 @@ extern void sysLogShutdown(void);
 extern void gfx_sdl_teardown_for_exit(void);
 extern int setenv(const char *name, const char *value, int overwrite);
 
-/* One start of the game. Without soak it never returns on success (the host
- * loop below runs until the process exits); with soak it returns 0 after
- * GE_SOAK_FRAMES presented frames, leaving everything running for
- * geShutdownOnce(). */
-static int geMainOnce(int argc, char **argv, int soak, int cycle)
+extern int g_videoNoExit;   /* video.c */
+extern int videoQuitRequested(void);
+
+/* One start of the game. mode 0 (stand-alone): never returns on success (the
+ * host loop below runs until the process exits). mode 1 (soak): returns 0
+ * after GE_SOAK_FRAMES presented frames. mode 2 (i64 module): returns 0 as
+ * soon as the game threads run; the host then calls geModuleFrame() per frame.
+ * Modes 1 and 2 leave everything running for geShutdownOnce(). */
+static int geMainOnce(int argc, char **argv, int mode, int cycle)
 {
+    const int soak = mode != 0;   /* no exit, no atexit, no ini save */
+    if (soak) g_videoNoExit = 1;
     sysSetArgs(argc, argv);
 
     if (sysArgCheck("--version")) { portPrintVersion(); return 0; }
@@ -170,8 +176,9 @@ static int geMainOnce(int argc, char **argv, int soak, int cycle)
      * failure here is reported before SDL/GL are involved. */
     portAddrInit();
 
-    /* Crash handler first, so any failure below is debuggable. */
-    crashInit();
+    /* Crash handler first, so any failure below is debuggable. Not inside i64
+     * (the host's process keeps its own handlers). */
+    if (mode != 2) crashInit();
 
     /* -fresh: clean-slate run -- drop the file-backed EEPROM save and the
      * ini before anything reads them (configLoad below, eeprom's lazy load).
@@ -311,6 +318,8 @@ static int geMainOnce(int argc, char **argv, int soak, int cycle)
     {
         const char *sf = getenv("GE_SOAK_FRAMES");
         const int stopAt = soak ? (sf && *sf ? atoi(sf) : 600) : 0;
+        if (mode == 2)
+            return 0;   /* i64 drives the host loop: geModuleFrame() */
         for (;;) {
             videoPumpEvents();
             sysSleep(8);
@@ -379,5 +388,33 @@ int main(int argc, char **argv)
         fprintf(stderr, "soak: cycle %d done: footprint %lu MB, %u threads (restored %lu KB, zeroed %lu KB)\n",
                 c, fpKb / 1024, threads, copiedKb, zeroKb);
     }
+    return 0;
+}
+
+/* ---- i64 module (port/hostlib/ge_i64_module.c) ----
+ * The caller has already taken the pristine copy (reentrySavePristine) and
+ * set the host's data folder, window and audio output. */
+int geModuleStart(void)
+{
+    char arg0[] = "ge007";
+    char *argv[] = { arg0, NULL };
+    return geMainOnce(1, argv, 2, 0);
+}
+
+/* One host frame: SDL events (the game threads run and render by themselves).
+ * Returns 0 once the game asked to quit. */
+int geModuleFrame(void)
+{
+    videoPumpEvents();
+    return videoQuitRequested() ? 0 : 1;
+}
+
+/* Back to the pristine state. Returns -1 if a game thread would not stop
+ * (then the module can't be started again). */
+int geModuleStop(void)
+{
+    if (geShutdownOnce() != 0)
+        return -1;
+    reentryRestorePristine();
     return 0;
 }
