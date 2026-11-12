@@ -438,13 +438,13 @@ static int connectFail(const char *what)
 /* Called from main() before the game starts. Returns 1 when an online session is set up. */
 int genetConnect(void)
 {
-    const char *server = envStr("GE_NET_SERVER");
-    const char *peer = envStr("GE_NET_PEER");
-    const char *s;
+    const char *server, *peer, *s;
     int port;
     unsigned long long deadline, nextHello = 0;
 
-    genetInit();
+    genetInit(); /* first: loads $S/netplay.cfg into the environment */
+    server = envStr("GE_NET_SERVER");
+    peer = envStr("GE_NET_PEER");
     s_IsHost = envStr("GE_NET_HOST") && atoi(envStr("GE_NET_HOST")) != 0;
     if (!s_IsHost && !peer && !(server && envStr("GE_NET_ROOM"))) {
         return 0;
