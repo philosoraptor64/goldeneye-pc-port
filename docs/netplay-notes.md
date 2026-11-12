@@ -1,0 +1,103 @@
+# Netplay and iPhone notes (philosoraptor64 fork, branch `netplay`)
+
+Online play for the GoldenEye 007 PC port, built on
+[n64net](https://github.com/philosoraptor64/n64net) (the same library the Smash,
+Mario Kart, Star Fox and Perfect Dark ports use), plus an iOS build.
+Base: upstream `release/v0.6.0` (native macOS arm64).
+
+## Building
+
+| Build | Command |
+|---|---|
+| Mac, GCC (upstream default; OpenGL) | `cmake -S . -B build-pc -G Ninja -DROMID=ntsc-final -DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)` |
+| Mac, clang (OpenGL or Metal) | add `-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`, e.g. `-B build-clang` |
+| iOS Simulator | `cmake -S . -B build-iossim -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64 -DROMID=ntsc-final -DSDL2_INCLUDE_DIR=<sdl>/include/SDL2 -DSDL2_LIBRARY=<sdl>/lib/libSDL2.a -DSDL2MAIN_LIBRARY=<sdl>/lib/libSDL2main.a` |
+
+`<sdl>` = a static SDL2 with the UIScene patch (iOS 27 SDK), e.g.
+`~/Development/N64/deps-iossim/sdl2` (simulator) / `deps-ios/sdl2` (device).
+Then `cmake --build <dir>`.
+
+All builds use `-ffp-contract=off`: GCC and clang builds simulate
+bit-identically (checked on a 5400-frame 4-player match).
+
+Game data (once, Mac): ROM -> `data/ge007.ntsc-final.z64`, then
+`python3 tools_pc/d43_emit.py ntsc-final && python3 tools_pc/d69_emit.py ntsc-final && python3 tools_pc/d88_emit.py ntsc-final --regen`.
+On iOS the same files go into the app's Documents folder (`$S` = Documents):
+the ROM, `pcmodels-ntsc-final/`, `pccg-ntsc-final/` (the sim test copies them).
+TODO: convert on the device (the Python converters would need a C port; upstream
+spawns a bundled Python binary, impossible on iOS).
+
+## Determinism (port/src/genet.c)
+
+Upstream's simulation steps by "however many 1/60 s of wall-clock passed"
+(findings D117), so two machines diverge. `GE_NET_DETERM=1` (always on online):
+- a fixed `GE_NET_STEP` (1) tick per frame on an absolute 60 Hz schedule;
+- input only through the RAMROM demo player's playback seam
+  (`joySetPlaybackFunc` + contdata 1): one sample of all four pads per frame;
+- no attract demo (it would replace the seam);
+- `GE_RSEED` / the session seed for the boot RNG.
+`GE_NET_HASHLOG=<file>` writes a per-frame state hash (RNG seeds, timers, menu
+state, players, chrs). Same-seed runs are identical, also with the CPU loaded,
+with GCC vs clang, and with Metal vs OpenGL.
+
+Test aids: `GE_NET_BOT=<pad mask>` (scripted bots), `GE_NET_BOT_FROM=<tick>`,
+`GE_NET_SCRIPT="tick:TOK,TOK;..."` (frame-exact menu scripts: A B Z START L R
+UP DOWN LEFT RIGHT CU CD CL CR, sticks SUP SDOWN SLEFT SRIGHT SNONE),
+`GE_NET_MENULOG=1` (menu/stage changes per tick), `GE_NET_FRAMES=<n>` (quit),
+`GE_NET_CONTROLLERS=<n>` (offline controller count), upstream's
+`GE_STARTMP=<players>,<mpstage>` + `GE_MPVIRT=<n-1>` (start an MP match at boot;
+mpstage 1 = Temple, 0 = random).
+
+## Online play
+
+Lockstep through `n64net_input` (input delay 2, raised automatically up to 6).
+The whole game is shared from boot like one console: host = player 1,
+guest = player 2; the guest uses the host's EEPROM (in memory, its own
+`ge007.eep` untouched) and seed; build fingerprint checked at the handshake.
+
+| Setting | |
+|---|---|
+| `GE_NET_HOST=1 [GE_NET_PORT=7501]` | host |
+| `GE_NET_PEER=a.b.c.d[:7501] [GE_NET_PORT=7502]` | guest |
+| `GE_NET_SERVER=host:port GE_NET_ROOM=ABCD [GE_NET_PASSWORD, GE_NET_RELAY=1]` | room code (both) |
+| `GE_NET_DELAY`, `GE_NET_WAIT_SECS` (60), `GE_NET_DROP_SECS` (20) | |
+| `GE_NET_SIM_LATENCY/_JITTER` (ms), `GE_NET_SIM_LOSS` (%) | simulated bad link |
+| `GE_NET_TEST_DESYNC=<tick>` | perturbs the RNG (desync detection test) |
+| `GE_NET_VIEW=split` / `GE_NET_FULLVIEW=<player>` | full view off / forced |
+
+iOS has no environment: the same lines go into `Documents/netplay.cfg`.
+
+- Controls online: `inputNetPure` forces the port's Original scheme (a strict
+  N64 pad) and turns off mouse look and the dedicated use/reload/crouch/gadget
+  actions, which write game state directly (porting notes F2).
+- Port settings that change the simulation: a guest with FOV 150, draw/LOD
+  distance 400, no native widescreen and an 800x600 window stays identical
+  (upstream's gameplay-visibility layer, D466). F10 edits during a match are
+  not synced (avoid them online).
+- Full view: in an online 2-4 player match each machine shows only its own
+  player's view, scaled uniformly to the window (gfx_pc.cpp canvas offset +
+  scissor clip; the game still draws all views).
+- A silent peer for 20 s or a BYE = play on offline. An app in the background
+  (iOS) is not handled yet (it will look like a lost connection).
+
+Tests (Mac): `tools/net/pair-test.sh` (two copies; `MENUS=1` = boot, title,
+host walks Multiplayer -> Start by script; `LATENCY/JITTER/LOSS`, `SERVER=local
+[RELAY=1]`, `DESYNC_TEST=<tick>`, `KILL_GUEST=<s>`, `GUEST_SET="Video.FovScale=150 ..."`).
+`tools/net/sim-test.sh` = the Mac hosts, the booted iOS Simulator joins
+(`MENUS=1`, `FRAMES`). All pass (see the commit messages for numbers).
+
+## iOS
+
+- `GE_IOS` (CMake) selects the iOS code. Do not test `PLATFORM_IOS`:
+  `<mach-o/loader.h>` defines it on macOS too.
+- Renderer: Metal (`port/fast3d/gfx_metal.mm`, ported from the PD port).
+  OpenGL ES drew into SDL's framebuffer but never reached the screen.
+  `GE_RENDERER=metal` uses it on macOS too (clang builds).
+- Address space: the port maps the N64's 32-bit space at a fixed host base
+  (`PORT_ADDR_BASE`, 16 TiB on macOS/Simulator). Only the regions it maps are
+  reserved (224 MB: cart, DRAM + mirror, thread stacks). A real iPhone has only
+  ~64 GB of address space, so the device build needs a base below that whose
+  regions are free; not known yet (needs a run on a phone).
+- Not done: signing/installing on a phone (MacBook), background/foreground
+  handling (AWAY/BACK), touch controls (use a Bluetooth controller), on-device
+  data conversion.
