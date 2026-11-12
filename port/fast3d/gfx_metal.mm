@@ -946,6 +946,55 @@ int gfx_metal_get_max_anisotropy_level(void) {
 
 } // namespace
 
+/* R1 (re-entry): release every Metal object before the globals are restored
+ * (a restore only drops the references: ~37 MB per run leaked). Runs after
+ * the render thread has stopped: waits for the frames still on the GPU, puts
+ * the frame semaphore back to its starting count (libdispatch aborts if a
+ * semaphore is freed below it), then empties the caches. */
+extern "C" void gfx_metal_release_all(void) {
+    if (!sDevice) {
+        return;
+    }
+    if (sFrameSemaphore) {
+        int got = 0;
+        for (int i = 0; i < kFramesInFlight; i++) {
+            if (dispatch_semaphore_wait(sFrameSemaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+                got++;
+            }
+        }
+        for (int i = 0; i < got; i++) {
+            dispatch_semaphore_signal(sFrameSemaphore);
+        }
+    }
+    sEnc = nil;
+    sCmd = nil;
+    sDrawable = nil;
+    sShaders.clear();
+    sCurrentShader = nullptr;
+    sTextures.clear();
+    sSamplerCache.clear();
+    sFramebuffers.clear();
+    sPipelines.clear();
+    sDepthStates.clear();
+    sClearPipelines.clear();
+    sDepthTex = nil;
+    sFrontTex = nil;
+    sResolveTemp = nil;
+    for (int i = 0; i < kFramesInFlight; i++) {
+        sVertexRing[i] = nil;
+    }
+    sWhiteTex = nil;
+    sDefaultSampler = nil;
+    sLinearClampSampler = nil;
+    sCopyPipeline = nil;
+    sClearVS = nil;
+    sClearFS = nil;
+    sFrameSemaphore = nil;
+    sLayer = nil;
+    sQueue = nil;
+    sDevice = nil;
+}
+
 struct GfxRenderingAPI gfx_metal_api = {
     gfx_metal_get_name,
     gfx_metal_get_max_texture_size,

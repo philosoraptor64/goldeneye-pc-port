@@ -215,5 +215,7 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
 - Stop = the R1 shutdown + globals restore. Tested on the Mac: `I64_DATA_DIR=<d> I64_ROM_DIR=<ROMs>
   I64_TEST_BACKGROUND=1 I64_TEST_GAME=ge007-us I64_TEST_GAME_FRAMES=300 I64_TEST_GAME_RUNS=2 I64_TEST_GAME_QUIT=1
   i64.app/Contents/MacOS/i64`: import from the ROM, run, stop, run again, quit, all clean.
-- Not yet: online (genet over i64's game channel), pause, session blob, iOS module build, the Metal renderer's
-  ~37 MB/run leak (GL is flat).
+- Memory: `gfx_metal_release_all()` (shutdown) releases every Metal object (waits for in-flight frames, restores
+  the frame semaphore's count first). Before: ~37 MB/run leaked; now flat (soak 4 cycles ~50 MB; in i64 3 runs
+  60 -> 67 -> 60 MB).
+- Not yet: online (genet over i64's game channel), pause, session blob, iOS module build.

@@ -351,6 +351,12 @@ static int geShutdownOnce(void)
     mixerDestroy();
     inputDestroy();
     videoDestroy();
+#if defined(GE_HAVE_METAL)
+    {
+        extern void gfx_metal_release_all(void);
+        gfx_metal_release_all();
+    }
+#endif
     gfx_sdl_teardown_for_exit();
     romdataDestroy();
     genetShutdown();
