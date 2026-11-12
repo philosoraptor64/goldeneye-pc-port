@@ -115,6 +115,18 @@ static std::map<ColorCombinerKey, struct ColorCombiner> color_combiner_pool;
 static std::map<ColorCombinerKey, struct ColorCombiner>::iterator prev_combiner = color_combiner_pool.end();
 
 static uint8_t* tex_upload_buffer = nullptr;
+/* Room for one converted texture, grown when needed (8 bytes of RGBA per source byte
+ * covers every format: 4-bit texels expand to two pixels). It used to be sized for the
+ * GPU's largest texture (8192^2 x 4 = 256 MB) and, inside i64, leaked at every stop. */
+static size_t tex_upload_capacity = 0;
+static void tex_upload_reserve(size_t src_bytes) {
+    const size_t need = src_bytes * 8 + 64;
+    if (need <= tex_upload_capacity) return;
+    size_t cap = tex_upload_capacity ? tex_upload_capacity : (4u << 20);
+    while (cap < need) cap *= 2;
+    uint8_t* p = (uint8_t*)realloc(tex_upload_buffer, cap);
+    if (p) { tex_upload_buffer = p; tex_upload_capacity = cap; }
+}
 
 static struct RSP {
     float modelview_matrix_stack[11][4][4];
@@ -898,6 +910,7 @@ static const uint8_t* gfx_tex_normalize_source(const uint8_t* addr, uint32_t ext
 }
 
 static void import_texture_rgba16(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
     const uint32_t full_image_line_size_bytes =
@@ -928,6 +941,7 @@ static void import_texture_rgba16(int tile, const LoadedTexture& loaded_texture,
 }
 
 static void import_texture_rgba32(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -949,6 +963,7 @@ static void import_texture_rgba32(int tile, const LoadedTexture& loaded_texture,
 }
 
 static void import_texture_ia4(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -982,6 +997,7 @@ static void import_texture_ia4(int tile, const LoadedTexture& loaded_texture, bo
 }
 
 static void import_texture_ia8(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -1008,6 +1024,7 @@ static void import_texture_ia8(int tile, const LoadedTexture& loaded_texture, bo
 }
 
 static void import_texture_ia16(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -1034,6 +1051,7 @@ static void import_texture_ia16(int tile, const LoadedTexture& loaded_texture, b
 }
 
 static void import_texture_i4(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -1061,6 +1079,7 @@ static void import_texture_i4(int tile, const LoadedTexture& loaded_texture, boo
 }
 
 static void import_texture_i8(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
     const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -1115,6 +1134,7 @@ static inline void palette_to_rgba32(const uint16_t palentry, uint8_t *rgba32_bu
 }
 
 static void import_texture_ci4(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
 	const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -1143,6 +1163,7 @@ static void import_texture_ci4(int tile, const LoadedTexture& loaded_texture, bo
 }
 
 static void import_texture_ci8(int tile, const LoadedTexture& loaded_texture, bool gen_mipmaps) {
+    tex_upload_reserve(loaded_texture.size_bytes);
 	const RawTexMetadata* metadata = &loaded_texture.raw_tex_metadata;
     const uint8_t* addr = loaded_texture.addr;
     const uint32_t size_bytes = loaded_texture.size_bytes;
@@ -6133,17 +6154,16 @@ extern "C" void gfx_init(const GfxInitSettings *settings) {
         segmentPointers[i] = 0;
     }
 
-    if (tex_upload_buffer == nullptr) {
-        // We cap texture max to 8k, because why would you need more?
-        int max_tex_size = std::min(8192, gfx_rapi->get_max_texture_size());
-        tex_upload_buffer = (uint8_t*)malloc(max_tex_size * max_tex_size * 4);
-    }
+    tex_upload_reserve(512u << 10);   /* 4 MB to start */
 
     /* D72: N64 boots with RSP memory zeroed — no lookat until gSPLookAt. */
     rsp.lookat_enabled = false;
 }
 
 extern "C" void gfx_destroy(void) {
+    free(tex_upload_buffer);   /* (re-entry: the next start allocates again) */
+    tex_upload_buffer = nullptr;
+    tex_upload_capacity = 0;
     // TODO: should also destroy rapi and wapi, and any other resources acquired in fast3d
 
     // Texture cache and loaded textures store references to Resources which need to be unreferenced.
