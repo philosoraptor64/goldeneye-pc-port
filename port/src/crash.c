@@ -353,7 +353,7 @@ static LONG __stdcall crashHandler(PEXCEPTION_POINTERS exinfo)
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
-#elif defined(PLATFORM_LINUX) || defined(PLATFORM_MACOS)
+#elif defined(PLATFORM_LINUX) || defined(PLATFORM_DARWIN)
 
 #include <ucontext.h>
 #include <signal.h>
@@ -362,7 +362,7 @@ static LONG __stdcall crashHandler(PEXCEPTION_POINTERS exinfo)
 #include <ctype.h>
 #include <dlfcn.h>
 #include <sys/fcntl.h>
-#if defined(PLATFORM_MACOS)
+#if defined(PLATFORM_DARWIN)
 #include <mach-o/dyld.h> /* _dyld_get_image_vmaddr_slide (for atos) */
 #endif
 
@@ -410,7 +410,7 @@ static void crashStackTrace(char *msg, int sig, void *pc, ucontext_t *ucontext, 
                   (void *)ucontext->uc_mcontext.gregs[REG_RSP],
                   (void *)ucontext->uc_mcontext.gregs[REG_RBP]);
     }
-#elif defined(PLATFORM_MACOS) && defined(PLATFORM_ARM)
+#elif defined(PLATFORM_DARWIN) && defined(PLATFORM_ARM)
     /* Darwin's uc_mcontext is a POINTER to __darwin_mcontext64; the arm64
      * thread state is __ss.__x[0..28], __fp, __lr, __sp, __pc. */
     if (ucontext) {
@@ -488,9 +488,9 @@ static void crashHandler(int sig, siginfo_t *siginfo, void *ctx)
         pc = (void *)ucontext->uc_mcontext.gregs[REG_EIP];
 #elif defined(PLATFORM_LINUX) && defined(PLATFORM_X86_64)
         pc = (void *)ucontext->uc_mcontext.gregs[REG_RIP];
-#elif defined(PLATFORM_MACOS) && defined(PLATFORM_X86_64)
+#elif defined(PLATFORM_DARWIN) && defined(PLATFORM_X86_64)
         pc = (void *)ucontext->uc_mcontext->__ss.__rip;
-#elif defined(PLATFORM_MACOS) && defined(PLATFORM_ARM)
+#elif defined(PLATFORM_DARWIN) && defined(PLATFORM_ARM)
         pc = (void *)(uintptr_t)ucontext->uc_mcontext->__ss.__pc;
 #endif
     }
@@ -583,7 +583,7 @@ void crashInit(void)
     SetErrorMode(SEM_FAILCRITICALERRORS);
     prevExFilter = SetUnhandledExceptionFilter(crashHandler);
     g_CrashEnabled = 1;
-#elif defined(PLATFORM_LINUX) || defined(PLATFORM_MACOS)
+#elif defined(PLATFORM_LINUX) || defined(PLATFORM_DARWIN)
     struct sigaction sigact = { 0 };
     sigact.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigact.sa_sigaction = crashHandler;
@@ -605,7 +605,7 @@ void crashShutdown(void)
     if (prevExFilter) {
         SetUnhandledExceptionFilter(prevExFilter);
     }
-#elif defined(PLATFORM_LINUX) || defined(PLATFORM_MACOS)
+#elif defined(PLATFORM_LINUX) || defined(PLATFORM_DARWIN)
     sigaction(SIGSEGV, &prevSigAction, NULL);
     sigaction(SIGABRT, &prevSigAction, NULL);
     sigaction(SIGBUS,  &prevSigAction, NULL);

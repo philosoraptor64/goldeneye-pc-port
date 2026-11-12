@@ -46,6 +46,12 @@
  *   +0x800000  end of region (8 MB, like an 8-MB-RAM N64)
  */
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <mach/mach.h>
+#endif
+#endif
 #include "platform.h"
 #include "system.h"
 #include "portaddr.h"
@@ -104,11 +110,36 @@ void *dramReserve(void)
 
     CloseHandle(hSec);
     return v1;
+#elif defined(PLATFORM_IOS)
+    /* iOS: the sandbox may refuse POSIX shared memory, so map V1 anonymously
+     * inside the reserved window and alias it at the KSEG0 view with
+     * vm_remap (copy = FALSE: both views share the same pages). */
+    void *v1 = mmap((void *)DRAM_V1_BASE, DRAM_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
+    if (v1 == MAP_FAILED || v1 != (void *)DRAM_V1_BASE) {
+        sysFatalError("dram: could not map DRAM at %p", (void *)DRAM_V1_BASE);
+    }
+    {
+        vm_address_t dst = (vm_address_t)DRAM_K0_BASE;
+        vm_prot_t cur, max;
+        kern_return_t kr = vm_remap(mach_task_self(), &dst, DRAM_SIZE, 0,
+                                    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                                    (vm_address_t)DRAM_V1_BASE, FALSE, &cur, &max, VM_INHERIT_SHARE);
+        if (kr != KERN_SUCCESS || dst != (vm_address_t)DRAM_K0_BASE) {
+            sysFatalError("dram: could not alias the KSEG0 mirror at %p (%d)", (void *)DRAM_K0_BASE, (int)kr);
+        }
+    }
+    ((volatile char *)v1)[0] = 0x5A;
+    if (((volatile char *)DRAM_K0_BASE)[0] != 0x5A) {
+        sysFatalError("dram: V1/V2 views do not share a backing store");
+    }
+    ((volatile char *)v1)[0] = 0;
+    return v1;
 #else
     /* One shared file descriptor + two MAP_SHARED mmaps = one backing store,
      * two views. Linux can keep it fully anonymous with memfd; Darwin uses a
      * POSIX shared-memory object and unlinks its name immediately. */
-#if defined(PLATFORM_MACOS)
+#if defined(PLATFORM_DARWIN)
     char shmName[64];
     snprintf(shmName, sizeof(shmName), "/ge007_dram_%ld", (long)getpid());
     int fd = shm_open(shmName, O_RDWR | O_CREAT, 0600);

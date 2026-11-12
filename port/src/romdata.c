@@ -428,10 +428,10 @@ int romdataInit(void)
              * catches a relocated result. On macOS portAddrInit has already
              * reserved the whole window, so MAP_FIXED lands inside our range. */
             int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifndef PLATFORM_MACOS
+#ifndef PLATFORM_DARWIN
 #ifdef MAP_FIXED_NOREPLACE
             flags |= MAP_FIXED_NOREPLACE;
-#elif defined(PLATFORM_MACOS)
+#elif defined(PLATFORM_DARWIN)
             /* __PAGEZERO ends at CART_BASE in the macOS build, so this range
              * is deliberately vacant. Darwin has no MAP_FIXED_NOREPLACE and
              * otherwise treats CART_BASE only as a hint, relocating it. */

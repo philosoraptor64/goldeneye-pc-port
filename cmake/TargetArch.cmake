@@ -2,7 +2,10 @@
 # Modelled on the Perfect Dark PC port's cmake/TargetArch.cmake.
 
 function(target_architecture OUT_VAR)
-  if(CMAKE_CROSSCOMPILING)
+  if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "^arm64$")
+    # iOS / iOS Simulator (cross-compiled; no compiler target triple)
+    set(_arch "aarch64")
+  elseif(CMAKE_CROSSCOMPILING)
     # Derive from the cross-compiler target, e.g. x86_64-w64-mingw32-gcc
     string(REGEX MATCH "^(i[3-6]86|x86_64|aarch64|arm|powerpc|wasm32)" _arch
            "${CMAKE_C_COMPILER_TARGET}")

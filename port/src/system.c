@@ -27,7 +27,7 @@
   #include <unistd.h>
   #include <time.h>
   #include <sys/stat.h>
-  #if defined(PLATFORM_MACOS)
+  #if defined(PLATFORM_DARWIN)
     #include <mach-o/dyld.h> /* _dyld_get_image_header, _NSGetExecutablePath */
   #endif
 #endif
@@ -62,7 +62,7 @@ uintptr_t sysImageBase(void)
 {
 #if defined(PLATFORM_WINDOWS)
     return (uintptr_t)GetModuleHandleW(NULL);
-#elif defined(PLATFORM_MACOS)
+#elif defined(PLATFORM_DARWIN)
     /* The mach_header of the main image == its load address. Unlike Windows
      * there is no fixed base: arm64 is PIE-only (and `-image_base` is ignored),
      * so this is 0x1_0000_0000 + a per-run ASLR slide. M1's image-relative
@@ -80,7 +80,7 @@ uintptr_t sysImageBase(void)
 static void getExeDir(char *buf, size_t buflen)
 {
     buf[0] = 0;
-#if defined(PLATFORM_MACOS)
+#if defined(PLATFORM_DARWIN)
     uint32_t n = (uint32_t)buflen;
     if (_NSGetExecutablePath(buf, &n) == 0) {
         char *slash = strrchr(buf, '/');
@@ -440,6 +440,13 @@ const char *sysResolvePath(const char *path)
          * which only knew the CWD-relative path — silently failed to write.
          * Prefer CWD data/ (dev/repo workflow), else exe-dir data/, and
          * create the directory best-effort so first-run writes don't fail. */
+#if defined(PLATFORM_IOS)
+        /* iOS: the app's Documents folder (shown in the Files app), which
+         * holds the ROM, the converted data, saves and ge007.ini. */
+        if (getenv("HOME"))
+            snprintf(out, sizeof(out), "%s/Documents/%s", getenv("HOME"), path + 3);
+        else
+#endif
         if (access("data", F_OK) == 0)
             snprintf(out, sizeof(out), "data/%s", path + 3);
         else {

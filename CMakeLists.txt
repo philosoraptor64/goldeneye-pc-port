@@ -24,7 +24,13 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 # (GCC does hard-error on the one struct that declares a member with the same
 # name as an inherited one — CCTVRecord's `pad` — see docs/internals.md.)
 # An explicit -DCMAKE_C_COMPILER=... always wins.
-if(NOT DEFINED CMAKE_C_COMPILER)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # iPhone / iOS Simulator: Apple clang only (see the clang flags below).
+  if(NOT DEFINED CMAKE_C_COMPILER)
+    set(CMAKE_C_COMPILER clang)
+    set(CMAKE_CXX_COMPILER clang++)
+  endif()
+elseif(NOT DEFINED CMAKE_C_COMPILER)
   if(CMAKE_HOST_APPLE)
     # Homebrew installs real GNU GCC with a version suffix; /usr/bin/gcc is
     # Apple Clang and does not support the Plan 9 struct extensions required
@@ -51,7 +57,9 @@ if(NOT DEFINED CMAKE_C_COMPILER)
   endif()
 endif()
 
-if(APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "17.0" CACHE STRING "" FORCE)
+elseif(APPLE)
   # CMAKE_OSX_ARCHITECTURES is normally EMPTY here (the build targets the host
   # arch), so an arm64 Mac used to fall into the 10.13 (Intel) floor and ld
   # warned that the brew-gcc aarch64 runtime libs and the generated .s objects
@@ -87,6 +95,13 @@ endif()
 # ASM is needed for the generated absolute ROM asset symbols
 # (port/src/romassets_<region>.s, see scripts/gen_romassets.py).
 project(ge007 C CXX ASM)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # iPhone build (docs/netplay-notes.md "iOS"). GE_IOS selects the iOS paths
+  # in port/ (Documents for data/saves, netplay.cfg, OpenGL ES context).
+  set(GE_IOS ON)
+  add_compile_definitions(GE_IOS=1)
+  set(GE_IOS_BUNDLE_ID "io.github.philosoraptor.goldeneye" CACHE STRING "iOS bundle identifier")
+endif()
 
 # Debug gate: validate every u32 -> host-pointer conversion against the regions
 # the port actually maps, and report offenders at the conversion site with a
@@ -531,11 +546,26 @@ include_directories(
 # ----------------------------------------------------------------------------
 set(LIBS "")
 
-find_package(SDL2 REQUIRED)
+if(GE_IOS)
+  # No find module for an iOS SDL: pass a static SDL2 built with the UIScene
+  # patch (e.g. ~/Development/N64/deps-iossim/sdl2 for the simulator):
+  # -DSDL2_INCLUDE_DIR=<prefix>/include/SDL2 -DSDL2_LIBRARY=<prefix>/lib/libSDL2.a
+  # -DSDL2MAIN_LIBRARY=<prefix>/lib/libSDL2main.a
+  if(NOT SDL2_LIBRARY OR NOT SDL2_INCLUDE_DIR OR NOT SDL2MAIN_LIBRARY)
+    message(FATAL_ERROR "iOS: set SDL2_LIBRARY, SDL2MAIN_LIBRARY and SDL2_INCLUDE_DIR")
+  endif()
+else()
+  find_package(SDL2 REQUIRED)
+endif()
 include_directories(SYSTEM "${SDL2_INCLUDE_DIR}")
 list(APPEND LIBS "${SDL2_LIBRARY}")
 
-find_package(ZLIB REQUIRED)
+if(GE_IOS)
+  set(ZLIB_LIBRARY "-lz")
+  set(ZLIB_INCLUDE_DIR "${_PORT_MACOS_SDK}/usr/include")
+else()
+  find_package(ZLIB REQUIRED)
+endif()
 if(ZLIB_INCLUDE_DIR)
   include_directories(SYSTEM "${ZLIB_INCLUDE_DIR}")
 endif()
@@ -561,6 +591,8 @@ configure_file(
 if(NOT GL_LIBRARY)
   if(WIN32)
     set(GL_LIBRARY opengl32)
+  elseif(GE_IOS)
+    set(GL_LIBRARY "-framework OpenGLES")
   elseif(APPLE)
     set(GL_LIBRARY "-framework OpenGL")
   else()
@@ -876,6 +908,21 @@ target_link_libraries(ge007 ${LIBS})
 # fingerprint refreshed at every build (cmake/NetBuildId.cmake) so only
 # identical builds connect.
 add_subdirectory(cmake/n64net "${CMAKE_BINARY_DIR}/n64net")
+if(GE_IOS)
+  target_link_libraries(ge007 "${SDL2MAIN_LIBRARY}"
+    "-framework UIKit" "-framework CoreGraphics" "-framework CoreMotion" "-framework GameController"
+    "-framework CoreHaptics" "-framework AVFoundation" "-framework AudioToolbox" "-framework CoreAudio"
+    "-framework CoreBluetooth" "-framework ImageIO" "-framework UniformTypeIdentifiers"
+    "-framework QuartzCore" "-framework Metal" "-framework Foundation" "-liconv")
+  set_target_properties(ge007 PROPERTIES
+    MACOSX_BUNDLE TRUE
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/ios/Info.plist.in"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "${GE_IOS_BUNDLE_ID}"
+    MACOSX_BUNDLE_BUNDLE_NAME "GoldenEye"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
+    MACOSX_BUNDLE_BUNDLE_VERSION "1"
+    XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${GE_IOS_BUNDLE_ID}")
+endif()
 target_link_libraries(ge007 n64net)
 add_custom_target(ge_net_build_id ALL
   COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/generated/genet_build_id.h

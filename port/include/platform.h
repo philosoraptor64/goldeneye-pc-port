@@ -16,6 +16,7 @@
   #define PLATFORM_WINDOWS 1
 #elif defined(__APPLE__)
   #include <TargetConditionals.h>
+  #define PLATFORM_DARWIN 1   /* macOS or iOS: Mach-O, dyld, Mach VM */
   #if TARGET_OS_IPHONE
     #define PLATFORM_IOS 1
   #else

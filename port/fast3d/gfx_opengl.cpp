@@ -68,6 +68,26 @@ static int gl_glsl_version = 130;
 static char gl_glsl_version_str[16] = "130";
 static GLenum gl_mirror_clamp = GL_MIRROR_CLAMP_TO_EDGE;
 static bool gl_es = false;
+/* The window's own framebuffer: GL name 0 on desktop, but SDL's UIKit view on
+ * iOS renders into a framebuffer object it creates (bound when the context is
+ * made current). Read once at init; used wherever the window is meant. */
+static GLuint gl_window_fbo = 0;
+#if defined(GE_IOS)
+/* iOS bring-up: report a pending GL error with the backend call that left it */
+static const char *s_glchk_prev = "init";
+static int s_glchk_count = 0;
+static void gechk(const char *fn) {
+    GLenum e = glGetError();
+    if (e != GL_NO_ERROR && s_glchk_count < 20) {
+        s_glchk_count++;
+        sysLogPrintf(LOG_WARNING, "GL error 0x%x after %s (next: %s)", e, s_glchk_prev, fn);
+    }
+    s_glchk_prev = fn;
+}
+#define GECHK() gechk(__func__)
+#else
+#define GECHK() ((void)0)
+#endif
 extern int gfx_rdp_affine;   /* D540: defined in gfx_pc.cpp */
 extern int gfx_fog_vertex;   /* D540: defined in gfx_pc.cpp */
 static bool gl_core_profile = false;
@@ -87,6 +107,7 @@ static struct GfxClipParameters gfx_opengl_get_clip_parameters(void) {
 }
 
 static void gfx_opengl_vertex_array_set_attribs(struct ShaderProgram* prg) {
+    GECHK();
     size_t num_floats = prg->num_floats;
     size_t pos = 0;
 
@@ -101,6 +122,7 @@ static void gfx_opengl_vertex_array_set_attribs(struct ShaderProgram* prg) {
 }
 
 static void gfx_opengl_set_uniforms(struct ShaderProgram* prg) {
+    GECHK();
     if (prg->frame_count_location >= 0) {
         glUniform1i(prg->frame_count_location, frame_count);
     }
@@ -116,6 +138,7 @@ static void gfx_opengl_set_uniforms(struct ShaderProgram* prg) {
 }
 
 static void gfx_opengl_unload_shader(struct ShaderProgram* old_prg) {
+    GECHK();
     if (old_prg != NULL) {
         for (int i = 0; i < old_prg->num_attribs; i++) {
             if (old_prg->attrib_locations[i] >= 0) {
@@ -126,6 +149,7 @@ static void gfx_opengl_unload_shader(struct ShaderProgram* old_prg) {
 }
 
 static void gfx_opengl_load_shader(struct ShaderProgram* new_prg) {
+    GECHK();
     // if (!new_prg) return;
     glUseProgram(new_prg->opengl_program_id);
     gfx_opengl_vertex_array_set_attribs(new_prg);
@@ -243,6 +267,7 @@ static void append_formula(char* buf, size_t* len, uint8_t c[2][4], bool do_sing
 }
 
 static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shader_id0, uint32_t shader_id1) {
+    GECHK();
     struct CCFeatures cc_features = { 0 };
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
 
@@ -710,17 +735,20 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
 }
 
 static struct ShaderProgram* gfx_opengl_lookup_shader(uint64_t shader_id0, uint32_t shader_id1) {
+    GECHK();
     auto it = shader_program_pool.find(make_pair(shader_id0, shader_id1));
     return it == shader_program_pool.end() ? nullptr : &it->second;
 }
 
 static void gfx_opengl_shader_get_info(struct ShaderProgram* prg, uint8_t* num_inputs, bool used_textures[2]) {
+    GECHK();
     *num_inputs = prg->num_inputs;
     used_textures[0] = prg->used_textures[0];
     used_textures[1] = prg->used_textures[1];
 }
 
 static void gfx_opengl_clear_shaders(void) {
+    GECHK();
     glUseProgram(0);
     for (auto& pair : shader_program_pool) {
         glDeleteProgram(pair.second.opengl_program_id);
@@ -729,16 +757,19 @@ static void gfx_opengl_clear_shaders(void) {
 }
 
 static GLuint gfx_opengl_new_texture(void) {
+    GECHK();
     GLuint ret;
     glGenTextures(1, &ret);
     return ret;
 }
 
 static void gfx_opengl_delete_texture(uint32_t texID) {
+    GECHK();
     glDeleteTextures(1, &texID);
 }
 
 static void gfx_opengl_select_texture(int tile, GLuint texture_id, bool linear_filter) {
+    GECHK();
     glActiveTexture(GL_TEXTURE0 + tile);
     glBindTexture(GL_TEXTURE_2D, texture_id);
 
@@ -746,6 +777,7 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id, bool linear_f
 }
 
 static void gfx_opengl_upload_texture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height, bool gen_mipmaps) {
+    GECHK();
 #ifdef PORT
     /* GE_TEXDUMP: PPM-dump every uploaded texture (first N) for B2/D161 triage.
      * D250: this runs on every texture upload -- cache the getenv() like the
@@ -811,6 +843,7 @@ static uint32_t gfx_cm_to_opengl(uint32_t val) {
 }
 
 static void gfx_opengl_set_sampler_parameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt, bool mipmaps) {
+    GECHK();
     const GLint min_filters[4][3] = {
         // MIPMAP_DISABLED   MIPMAP_NEAREST               MIPMAP_LINEAR
         {  GL_NEAREST,       GL_NEAREST_MIPMAP_NEAREST,   GL_NEAREST_MIPMAP_LINEAR  }, // FILTER_NONE
@@ -859,6 +892,7 @@ static void gfx_opengl_set_sampler_parameters(int tile, bool linear_filter, uint
 }
 
 static void gfx_opengl_set_depth_mode(bool depth_test, bool depth_update, bool depth_compare, bool depth_source_prim, uint16_t zmode) {
+    GECHK();
     if (depth_test) {
         glEnable(GL_DEPTH_TEST);
         glDepthMask(depth_update ? GL_TRUE : GL_FALSE);
@@ -900,6 +934,7 @@ static void gfx_opengl_set_depth_mode(bool depth_test, bool depth_update, bool d
 }
 
 static void gfx_opengl_set_depth_range(float znear, float zfar) {
+    GECHK();
     if (glDepthRangef) {
         glDepthRangef(znear, zfar);
     } else {
@@ -908,14 +943,17 @@ static void gfx_opengl_set_depth_range(float znear, float zfar) {
 }
 
 static void gfx_opengl_set_viewport(int x, int y, int width, int height) {
+    GECHK();
     glViewport(x, y, width, height);
 }
 
 static void gfx_opengl_set_scissor(int x, int y, int width, int height) {
+    GECHK();
     glScissor(x, y, width, height);
 }
 
 static void gfx_opengl_set_use_alpha(bool use_alpha, bool modulate) {
+    GECHK();
     if (use_alpha) {
         glEnable(GL_BLEND);
     } else {
@@ -929,6 +967,7 @@ static void gfx_opengl_set_use_alpha(bool use_alpha, bool modulate) {
 }
 
 static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
+    GECHK();
     // printf("flushing %d tris\n", buf_vbo_num_tris);
     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
@@ -947,6 +986,7 @@ static void APIENTRY gl_debug(GLenum source, GLenum type, GLuint id, GLenum seve
 }
 
 static void gfx_opengl_enable_debug(void) {
+    GECHK();
     if (GLAD_GL_KHR_debug) {
         glEnable(GL_DEBUG_OUTPUT);
     }
@@ -965,6 +1005,7 @@ static void gfx_opengl_enable_debug(void) {
 }
 
 static bool gfx_opengl_supports_framebuffers(void) {
+    GECHK();
     if (GLVersion.major > 2) {
         // GL3.0+ supports everything we need, but we'll still check it for sanity
         return (glad_glFramebufferRenderbuffer && glad_glBlitFramebuffer && glad_glRenderbufferStorageMultisample);
@@ -982,6 +1023,7 @@ static bool gfx_opengl_supports_framebuffers(void) {
 }
 
 static bool gfx_opengl_supports_shaders(void) {
+    GECHK();
     if (GLVersion.major > 2) {
         // should support GLSL130+
         return true;
@@ -1011,6 +1053,7 @@ extern "C" const char *gfx_opengl_renderer_string(void) {
 }
 
 static void gfx_opengl_log_info(void) {
+    GECHK();
     const char *version = (const char *)glGetString(GL_VERSION);
     const char *vendor = (const char *)glGetString(GL_VENDOR);
     const char *renderer = (const char *)glGetString(GL_RENDERER);
@@ -1048,6 +1091,7 @@ static void *gl_load_proc(const char *name) {
 }
 
 static void gfx_opengl_init_extensions(void) {
+    GECHK();
     // patch up some extension values and pointers
     if (!GLAD_GL_ARB_depth_clamp) {
         if (GLAD_GL_EXT_depth_clamp || GLAD_GL_NV_depth_clamp) {
@@ -1083,6 +1127,12 @@ static void gfx_opengl_init_extensions(void) {
 static void gfx_opengl_init(void) {
     if (!gladLoadGLLoader(gl_load_proc) || glGetString == NULL || glEnable == NULL) {
         sysFatalError("Could not load OpenGL.\nReported SDL error: %s", SDL_GetError());
+    }
+
+    {
+        GLint b = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &b);
+        gl_window_fbo = (GLuint)b;
     }
 
     // check if we're using ES or core, which have more limited feature sets
@@ -1183,9 +1233,11 @@ static void gfx_opengl_init(void) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     framebuffers.resize(1); // for the default screen buffer
+    framebuffers[0].fbo = gl_window_fbo;
 }
 
 static void gfx_opengl_on_resize(void) {
+    GECHK();
 }
 
 /* #92 perf probe (GE_PERFSTAT=1): GPU time per frame via GL_TIME_ELAPSED,
@@ -1205,6 +1257,7 @@ extern "C" void gfx_opengl_frame_count_rewind(void) {
 }
 
 static void gfx_opengl_start_frame(void) {
+    GECHK();
     frame_count++;
     if (s_gpuq_on < 0) {
         s_gpuq_on = getenv("GE_PERFSTAT") != NULL && glGenQueries != NULL &&
@@ -1231,7 +1284,34 @@ static void gfx_opengl_start_frame(void) {
 }
 
 static void gfx_opengl_end_frame(void) {
+    GECHK();
     glFlush();
+#if defined(GE_IOS)
+    {   /* iOS bring-up diagnostics: the first frames' GL state */
+        static int n = 0;
+        if (n == 600 || n == 900) {
+            GLint vp2[4] = {0};
+            glGetIntegerv(GL_VIEWPORT, vp2);
+            unsigned char px[4 * 5] = {0};
+            int lit = 0;
+            for (int k = 0; k < 5; k++) {
+                glReadPixels(vp2[2] * (k + 1) / 6, vp2[3] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px + 4 * k);
+                if (px[4 * k] | px[4 * k + 1] | px[4 * k + 2]) lit++;
+            }
+            sysLogPrintf(LOG_NOTE, "GL frame %d readback: %d/5 lit (%02x%02x%02x %02x%02x%02x)", n, lit,
+                         px[0], px[1], px[2], px[8], px[9], px[10]);
+        }
+        if (n < 5 || n == 300) {
+            GLint bound = -1, vp[4] = {0};
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+            glGetIntegerv(GL_VIEWPORT, vp);
+            sysLogPrintf(LOG_NOTE, "GL frame %d: err 0x%x, bound fbo %d (window fbo %u) status 0x%x, viewport %d,%d %dx%d",
+                         n, glGetError(), bound, gl_window_fbo, glCheckFramebufferStatus(GL_FRAMEBUFFER),
+                         vp[0], vp[1], vp[2], vp[3]);
+        }
+        n++;
+    }
+#endif
     if (s_gpuq_on == 1) {
         glEndQuery(GL_TIME_ELAPSED);
         s_gpuq_valid[s_gpuq_idx] = 1;
@@ -1257,7 +1337,7 @@ extern "C" bool gfx_opengl_dump_bound_fbo(uint32_t width, uint32_t height, const
     size_t n = (size_t)width * height * 3;
     uint8_t* pixels = (uint8_t*)malloc(n);
     if (!pixels) return false;
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gl_window_fbo);
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glFinish();
@@ -1284,6 +1364,7 @@ extern "C" bool gfx_opengl_dump_bound_fbo(uint32_t width, uint32_t height, const
 }
 
 static void gfx_opengl_finish_render(void) {
+    GECHK();
 }
 
 /* D578: present queue for frame interpolation (gfx_pc.cpp). Each slot is a
@@ -1295,7 +1376,8 @@ static uint32_t s_islot_w, s_islot_h;
 static uint32_t s_islot_tw[GFX_INTERP_SLOTS], s_islot_th[GFX_INTERP_SLOTS];   /* D583: per-slot storage size */
 
 static void gfx_opengl_interp_restore_binding(void) {
-    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? 0 : framebuffers[current_framebuffer].fbo);
+    GECHK();
+    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? gl_window_fbo : framebuffers[current_framebuffer].fbo);
     glReadBuffer(GL_BACK);
     glEnable(GL_SCISSOR_TEST);
 }
@@ -1326,7 +1408,7 @@ extern "C" void gfx_opengl_interp_store(int slot, uint32_t width, uint32_t heigh
     s_islot_w = width;
     s_islot_h = height;
     glDisable(GL_SCISSOR_TEST);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gl_window_fbo);
     glReadBuffer(GL_BACK);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_islot_fbo[slot]);
     glBlitFramebuffer(0, 0, (GLint)width, (GLint)height, 0, 0, (GLint)width, (GLint)height,
@@ -1347,7 +1429,7 @@ extern "C" void gfx_opengl_interp_show(int slot) {
     glDisable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, s_islot_fbo[slot]);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gl_window_fbo);
     /* The slot's own size: one stored before a window resize can still be pending (D583 ring). */
     glBlitFramebuffer(0, 0, (GLint)s_islot_tw[slot], (GLint)s_islot_th[slot], 0, 0, (GLint)s_islot_tw[slot], (GLint)s_islot_th[slot],
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -1355,6 +1437,7 @@ extern "C" void gfx_opengl_interp_show(int slot) {
 }
 
 static int gfx_opengl_create_framebuffer() {
+    GECHK();
     size_t i = framebuffers.size();
     framebuffers.resize(i + 1);
 
@@ -1392,6 +1475,7 @@ static int gfx_opengl_create_framebuffer() {
 static void gfx_opengl_update_framebuffer_parameters(int fb_id, uint32_t width, uint32_t height, uint32_t msaa_level,
                                                      bool opengl_invert_y, bool render_target, bool has_depth_buffer,
                                                      bool can_extract_depth) {
+    GECHK();
     Framebuffer& fb = framebuffers[fb_id];
 
     width = max(width, 1U);
@@ -1458,6 +1542,7 @@ static void gfx_opengl_update_framebuffer_parameters(int fb_id, uint32_t width, 
 }
 
 bool gfx_opengl_start_draw_to_framebuffer(int fb_id, float noise_scale) {
+    GECHK();
     if (gfx_framebuffers_enabled && fb_id < (int)framebuffers.size()) {
         Framebuffer& fb = framebuffers[fb_id];
         if (noise_scale != 0.0f) {
@@ -1467,7 +1552,7 @@ bool gfx_opengl_start_draw_to_framebuffer(int fb_id, float noise_scale) {
          * framebuffer (GL name 0), not framebuffers[0].fbo (a generated but
          * attachment-less FBO -> incomplete -> nothing renders on a strict
          * GL implementation like Mesa/llvmpipe). */
-        glBindFramebuffer(GL_FRAMEBUFFER, fb_id == 0 ? 0 : fb.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb_id == 0 ? gl_window_fbo : fb.fbo);
         current_framebuffer = fb_id;
         return true;
     } else {
@@ -1476,6 +1561,7 @@ bool gfx_opengl_start_draw_to_framebuffer(int fb_id, float noise_scale) {
 }
 
 void gfx_opengl_clear_framebuffer(bool clear_color, bool clear_depth) {
+    GECHK();
     glDisable(GL_SCISSOR_TEST);
     
     GLbitfield mask = 0;
@@ -1499,6 +1585,7 @@ void gfx_opengl_clear_framebuffer(bool clear_color, bool clear_depth) {
  * bottom-up pixel coordinates as gfx_opengl_set_scissor. Mirrors the
  * depth-mask save/restore of gfx_opengl_clear_framebuffer. */
 void gfx_opengl_clear_region(bool clear_color, bool clear_depth, int x, int y, int w, int h) {
+    GECHK();
     if (w <= 0 || h <= 0) return;
 
     GLbitfield mask = 0;
@@ -1519,6 +1606,7 @@ void gfx_opengl_clear_region(bool clear_color, bool clear_depth, int x, int y, i
 }
 
 void gfx_opengl_resolve_msaa_color_buffer(int fb_id_target, int fb_id_source) {
+    GECHK();
     if (!gfx_framebuffers_enabled) {
         return;
     }
@@ -1531,15 +1619,17 @@ void gfx_opengl_resolve_msaa_color_buffer(int fb_id_target, int fb_id_source) {
     glBlitFramebuffer(0, 0, fb_src.width, fb_src.height, 0, 0, fb_dst.width, fb_dst.height, GL_COLOR_BUFFER_BIT,
                       GL_NEAREST);
     /* current_framebuffer is an INDEX into framebuffers[], not a GL name; fb 0 is the window's default framebuffer (name 0). */
-    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? 0 : framebuffers[current_framebuffer].fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? gl_window_fbo : framebuffers[current_framebuffer].fbo);
     glEnable(GL_SCISSOR_TEST);
 }
 
 void* gfx_opengl_get_framebuffer_texture_id(int fb_id) {
+    GECHK();
     return (void*)(uintptr_t)framebuffers[fb_id].clrbuf;
 }
 
 void gfx_opengl_select_texture_fb(int fb_id) {
+    GECHK();
     // glDisable(GL_DEPTH_TEST);
     glActiveTexture(GL_TEXTURE0 + 0);
     glBindTexture(GL_TEXTURE_2D, framebuffers[fb_id].clrbuf);
@@ -1548,6 +1638,7 @@ void gfx_opengl_select_texture_fb(int fb_id) {
 }
 
 void gfx_opengl_copy_framebuffer(int fb_dst, int fb_src, int left, int top, bool flip_y, bool use_back) {
+    GECHK();
     if (!gfx_framebuffers_enabled || fb_dst >= (int)framebuffers.size() || fb_src >= (int)framebuffers.size()) {
         return;
     }
@@ -1595,7 +1686,7 @@ void gfx_opengl_copy_framebuffer(int fb_dst, int fb_src, int left, int top, bool
 
     glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? 0 : framebuffers[current_framebuffer].fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, current_framebuffer == 0 ? gl_window_fbo : framebuffers[current_framebuffer].fbo);
 
     glReadBuffer(GL_BACK);
 
@@ -1603,24 +1694,29 @@ void gfx_opengl_copy_framebuffer(int fb_dst, int fb_src, int left, int top, bool
 }
 
 void gfx_opengl_set_texture_filter(FilteringMode mode) {
+    GECHK();
     current_filter_mode = mode;
 }
 
 FilteringMode gfx_opengl_get_texture_filter(void) {
+    GECHK();
     return current_filter_mode;
 }
 
 void gfx_opengl_set_mipmap_filter(MipmapFilteringMode mode) {
+    GECHK();
     current_mipmap_filter_mode = mode;
 }
 
 static int gfx_opengl_get_max_anisotropy_level() {
+    GECHK();
 	GLfloat max_aniso_level;
 	glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &max_aniso_level);
 	return (int)max_aniso_level;
 }
 
 static void gfx_opengl_set_anisotropy_level(int level) {
+    GECHK();
 	current_anisotropy_level = level;
 }
 

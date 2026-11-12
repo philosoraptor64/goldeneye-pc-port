@@ -57,6 +57,10 @@ typedef struct ChrRecord ChrRecord;
 extern ChrRecord *g_ChrSlots;
 extern s32 g_NumChrSlots;
 
+/* host libc (the decomp's include/stdlib.h stub shadows the host header) */
+int setenv(const char *name, const char *value, int overwrite);
+void _Exit(int status);
+
 void joyPortLatestPad(s32 channel, OSContPad *out);  /* src/joy.c */
 void portEepromCopy(u8 *out);                        /* port/src/libultra.c */
 void portEepromAdopt(const u8 *in);
@@ -122,13 +126,44 @@ static const char *envStr(const char *name)
 
 static void netLog(const char *fmt, ...)
 {
+    char buf[700];
     va_list ap;
+    size_t n;
     va_start(ap, fmt);
-    fprintf(stderr, "genet: ");
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (fmt[0] && fmt[strlen(fmt) - 1] != '\n') fputc('\n', stderr);
-    fflush(stderr);
+    n = strlen(buf);
+    if (n && buf[n - 1] == '\n') buf[n - 1] = 0;
+    /* the game's log: stderr and $S/ge007.log (the only place to read it on iOS) */
+    sysLogPrintf(LOG_NOTE, "genet: %s", buf);
+}
+
+/* $S/netplay.cfg: KEY=VALUE lines (GE_NET_* etc.), '#' comments. The way to
+ * set netplay options where there are no environment variables (iOS); an
+ * existing environment variable wins. */
+static void loadConfigFile(void)
+{
+    char line[512];
+    FILE *f = fopen(sysResolvePath("$S/netplay.cfg"), "r");
+    int n = 0;
+    if (!f) return;
+    while (fgets(line, sizeof(line), f)) {
+        char *eq, *end;
+        char *k = line;
+        while (*k == ' ' || *k == '\t') k++;
+        if (*k == '#' || *k == '\n' || *k == 0) continue;
+        eq = strchr(k, '=');
+        if (!eq) continue;
+        *eq = 0;
+        end = eq + 1 + strlen(eq + 1);
+        while (end > eq + 1 && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ')) *--end = 0;
+        if (!getenv(k)) {
+            setenv(k, eq + 1, 1);
+            n++;
+        }
+    }
+    fclose(f);
+    if (n) netLog("netplay.cfg: %d setting(s)", n);
 }
 
 static void put32(u8 *p, u32 v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
@@ -144,6 +179,7 @@ static void genetInit(void)
         return;
     }
     s_Init = 1;
+    loadConfigFile();
 
     e = getenv("GE_NET_DETERM");
     s_Determ = (e && *e && atoi(e) != 0);

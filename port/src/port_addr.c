@@ -32,6 +32,13 @@
 #if defined(PLATFORM_MACOS) && defined(PLATFORM_ARM)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#elif defined(PLATFORM_IOS)
+/* The iOS SDK blocks <mach/mach_vm.h>; vm_map is the same call with 64-bit
+ * vm_address_t on arm64. */
+#include <mach/mach.h>
+#define mach_vm_address_t vm_address_t
+#define mach_vm_size_t vm_size_t
+#define mach_vm_map vm_map
 #endif
 
 uintptr_t g_portImageBase = 0;

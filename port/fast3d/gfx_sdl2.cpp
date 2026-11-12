@@ -9,7 +9,11 @@
 #include "gfx_screen_config.h"
 #include "input.h"
 #include "ge007_icon.h"
-#if defined(__APPLE__)
+#if defined(GE_IOS)
+#include <objc/runtime.h>
+#include <objc/message.h>
+#endif
+#if defined(__APPLE__) && !defined(GE_IOS)
 #include <OpenGL/OpenGL.h>   /* D952: CGL swap interval */
 #endif
 
@@ -31,7 +35,7 @@ static bool vsync_enabled = true;
  * the VSync inside flushBuffer, as SDL2 did on macOS. Must be called with the
  * context current (both callers are: init on the host thread, live config on
  * the render thread). */
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GE_IOS)
 static int s_cglSwapInterval = 0;
 static bool gfx_sdl_apply_swap_interval(int interval) {
     SDL_GL_SetSwapInterval(0);
@@ -242,6 +246,9 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
     // if that doesn't work, try 3.2 core in case we're on mac, 2.1 compat as a last resort
     static u32 glver[][3] = {
         { 0, 0, 0                                    }, // for command line override
+#if defined(GE_IOS)
+        { 3, 0, SDL_GL_CONTEXT_PROFILE_ES            }, // iOS: OpenGL ES 3.0 is the only GL there
+#endif
         { 3, 0, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY }, // 3.0: default, has all the features required
         { 4, 1, SDL_GL_CONTEXT_PROFILE_CORE          }, // 4.1core: macs only have core profile and this is the latest
         { 3, 2, SDL_GL_CONTEXT_PROFILE_CORE          }, // 3.2core: older macs will only have this at best
@@ -298,7 +305,7 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
     }
 
     SDL_GL_MakeCurrent(wnd, ctx);
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GE_IOS)
     gfx_sdl_apply_swap_interval(1);   /* D952 */
 #else
     SDL_GL_SetSwapInterval(1);
@@ -626,6 +633,16 @@ static void gfx_sdl_swap_buffers_begin(void) {
         gfx_pre_swap_hook();
     }
     SDL_GL_SwapWindow(wnd);
+#if defined(GE_IOS)
+    /* iOS: this runs on the render thread, which has no run loop, so the
+     * implicit Core Animation transaction of the present is never committed
+     * and the screen stays black. Commit it here: [CATransaction flush]. */
+    {
+        static Class cls = objc_getClass("CATransaction");
+        static SEL sel = sel_registerName("flush");
+        if (cls) ((void (*)(Class, SEL))objc_msgSend)(cls, sel);
+    }
+#endif
 }
 
 static void gfx_sdl_swap_buffers_end(void) {
@@ -666,7 +683,7 @@ static void gfx_sdl_set_window_title(const char *title) {
 }
 
 static int gfx_sdl_get_swap_interval(void) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GE_IOS)
     return s_cglSwapInterval;   /* D952 */
 #else
     return SDL_GL_GetSwapInterval();
@@ -674,7 +691,7 @@ static int gfx_sdl_get_swap_interval(void) {
 }
 
 static bool gfx_sdl_set_swap_interval(int interval) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(GE_IOS)
     const bool success = gfx_sdl_apply_swap_interval(interval);   /* D952 */
 #else
     const bool success = SDL_GL_SetSwapInterval(interval) >= 0;
