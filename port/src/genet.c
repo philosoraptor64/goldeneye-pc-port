@@ -926,6 +926,11 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
             gnt_sleep_us(250);
         }
         s_StallUs += gnt_now_us() - start;
+        /* restart the frame schedule from now: otherwise this side, now behind its
+         * own 60 Hz schedule, rushes the next frames to catch up, gets ahead of the
+         * other machine again and stalls on every tick (seen: the host stalling
+         * ~800 times in 30 s, the guest never) */
+        s_NextUs = 0;
     }
     for (int p = 0; p < s_NumPlayers; p++) {
         n64net_pad n;

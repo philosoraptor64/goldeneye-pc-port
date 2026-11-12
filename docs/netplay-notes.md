@@ -232,8 +232,11 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
   session blobs yet, so without one genet runs its own handshake over the channel (`channelHandshake`: HELLO/WELCOME
   build check + the host's save in chunks). `n64_game_frame` forwards i64's session events (PEER_AWAY/BACK/LEFT).
   `SEQ="ge007-us:2400" EXTRA_ENV="GE_NET_BOT=1" i64/scripts/pair-test.sh` (data folders with the module + game
-  data): connected as players 1/2 with i64's seed, **60/60 sync checks matched both sides**, rtt 8 ms. Host stalled
-  7.8 s over 30 s (guest 0): to look at (probably the host waiting while the guest boots).
+  data): connected as players 1/2 with i64's seed, **60/60 sync checks matched both sides**, rtt 8 ms.
+  **Host stall fixed (2026-11-12):** after a lockstep wait the side was behind its own absolute 60 Hz schedule, rushed
+  to catch up, got ahead again and stalled every tick (host 842 stalls / 7.8 s in 30 s, guest 0). Now the schedule
+  restarts after a wait (`s_NextUs = 0`, as after an app-away hold): Mac pair host 5 stalls / 0.5 s, still 60/60;
+  Mac <-> 14 Pro: 17-19 stalls a side, which follow Wi-Fi rtt spikes (up to ~450 ms), 60/60.
 - **Mac <-> iPhone 14 Pro online through i64 (2026-11-12): IN SYNC** after a fix. Before: desyncs at varying ticks
   (661, 690, 1350...). Found with `GE_NET_HASHLOG=hash.txt` (relative = the game's data folder, also on iOS) +
   `GE_NET_HASHLOG_VALUES=1` (raw RNG/timer/stage/menu per line) + `GE_NET_RNGTRACE=<from>:<to>` (every RNG draw
