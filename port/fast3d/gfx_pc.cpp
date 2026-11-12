@@ -287,6 +287,10 @@ extern "C" void gfx_set_safe_area_crop(int on) {
  * winner alternate frame to frame). While a 2+ player stage is running the
  * N64's own split layout is used unmodified. */
 static bool g_split_screen = false;
+/* Netplay full view (see gfx_start_frame) */
+extern "C" int genetFullViewRect(int* left, int* top, int* width, int* height);
+static bool s_full_view = false;
+static XYWidthHeight s_full_view_clip;   /* the local view on the window (GL bottom-up px) */
 /* D510: set while the port-layer overlay DL (F10 panel / FPS counter) runs.
  * That is PC chrome, not game content: it maps the logical canvas onto the
  * whole window, bypassing the safe-area crop (which follows the game's last
@@ -3860,6 +3864,17 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
         }
         XYWidthHeight sc = rdp.scissor;
         gfx_interp_scissor(&sc);   /* D578: in-between passes move portal scissors */
+        if (s_full_view) {
+            /* netplay full view: only the local player's view reaches the window */
+            const int32_t x0 = std::max<int32_t>(sc.x, s_full_view_clip.x);
+            const int32_t y0 = std::max<int32_t>(sc.y, s_full_view_clip.y);
+            const int32_t x1 = std::min<int32_t>(sc.x + (int32_t)sc.width, s_full_view_clip.x + (int32_t)s_full_view_clip.width);
+            const int32_t y1 = std::min<int32_t>(sc.y + (int32_t)sc.height, s_full_view_clip.y + (int32_t)s_full_view_clip.height);
+            sc.x = (int16_t)x0;
+            sc.y = (int16_t)y0;
+            sc.width = (uint32_t)std::max<int32_t>(0, x1 - x0);
+            sc.height = (uint32_t)std::max<int32_t>(0, y1 - y0);
+        }
         if (memcmp(&sc, &rendering_state.scissor, sizeof(sc)) != 0) {
             gfx_flush();
             gfx_rapi->set_scissor(sc.x, sc.y, sc.width, sc.height);
@@ -6139,6 +6154,14 @@ extern "C" struct GfxRenderingAPI* gfx_get_current_rendering_api(void) {
     return gfx_rapi;
 }
 
+/* Netplay full view (port/src/genet.c): in an online split-screen match each
+ * machine shows only its own player. The canvas becomes cols x rows windows
+ * (GE's layout: 2 players top/bottom, 3-4 in quadrants) and is offset so the
+ * local player's cell covers the window; the other cells fall outside it.
+ * The game still draws every player's view (the simulation is unchanged),
+ * and its 3D aspect follows the canvas, so the zoomed view is undistorted. */
+/* (netplay full view state: declared near g_split_screen) */
+
 extern "C" void gfx_start_frame(void) {
     gfx_wapi->handle_events();
     gfx_wapi->get_dimensions(&gfx_current_window_dimensions.width, &gfx_current_window_dimensions.height,
@@ -6183,6 +6206,34 @@ extern "C" void gfx_start_frame(void) {
         gfx_current_dimensions.height = rh;
         gfx_current_dimensions.aspect_ratio = g_output_aspect;
         gfx_current_game_window_viewport = g_output_rect;
+    }
+
+    {
+        /* The local view (N64 320x240 units) scaled uniformly (no stretched
+         * HUD) to fit the window, centred; the 4:3 canvas around it is larger
+         * than the window and everything is clipped to the view. */
+        int vl = 0, vt = 0, vw = 0, vh = 0;
+        s_full_view = genetFullViewRect(&vl, &vt, &vw, &vh) != 0 && vw > 0 && vh > 0;
+        if (s_full_view) {
+            const float ww = (float)gfx_current_window_dimensions.width;
+            const float wh = (float)gfx_current_window_dimensions.height;
+            const float a0 = 4.0f / 3.0f;
+            const float fx = vl / 320.0f, fy = vt / 240.0f, fw = vw / 320.0f, fh = vh / 240.0f;
+            const float cw = std::min(ww / fw, wh * a0 / fh);
+            const float ch = cw / a0;
+            const float viewW = fw * cw, viewH = fh * ch;
+            const float left = (ww - viewW) * 0.5f, top = (wh - viewH) * 0.5f;
+            gfx_current_dimensions.width = (uint32_t)std::lround(cw);
+            gfx_current_dimensions.height = (uint32_t)std::lround(ch);
+            gfx_current_dimensions.aspect_ratio = a0;
+            /* x, y: the canvas's top-left corner in window pixels (top-down) */
+            gfx_current_game_window_viewport.x = (int16_t)std::lround(left - fx * cw);
+            gfx_current_game_window_viewport.y = (int16_t)std::lround(top - fy * ch);
+            gfx_current_game_window_viewport.width = gfx_current_dimensions.width;
+            gfx_current_game_window_viewport.height = gfx_current_dimensions.height;
+            s_full_view_clip = { (int16_t)std::lround(left), (int16_t)std::lround(wh - top - viewH),
+                                 (uint32_t)std::lround(viewW), (uint32_t)std::lround(viewH) };
+        }
     }
 
     if (gfx_current_dimensions.height != gfx_prev_dimensions.height) {
@@ -6288,7 +6339,11 @@ static void gfx_frame_body(Gfx* commands, bool emit_overlay, Gfx** overlay_io, u
      * G_CLEAR_DEPTH_EXT when it needs a depth reset (line 5536), exactly as on
      * N64, and the original port cleared color-only.
      */
-    {
+    if (s_full_view) {
+        /* full view: black around the local view (the view itself is redrawn) */
+        gfx_rapi->clear_region(true, false, 0, 0, gfx_current_window_dimensions.width,
+                               gfx_current_window_dimensions.height);
+    } else {
         const bool diff = gfx_current_dimensions.width != gfx_current_game_window_viewport.width ||
                           gfx_current_dimensions.height != gfx_current_game_window_viewport.height;
         int32_t cw = gfx_current_dimensions.width, ch = gfx_current_dimensions.height;
