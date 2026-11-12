@@ -36,6 +36,8 @@
 #include <time.h>
 
 #include "system.h"
+#include <pthread.h>
+static const char *sysResolvePathRel(const char *rel);
 #include "genet.h"
 #include "joy.h"
 #include "player.h"
@@ -108,6 +110,8 @@ static int (*s_ExtRecv)(void *buf, u32 cap) = NULL;
 static int s_HostPaced = 0;
 static int s_ExtPeerAway = 0;
 static void startSession(void);
+static s32 s_SavedSkipIntro = 0;
+static int s_SkipIntroSaved = 0;
 static int externalTest(const char *role);
 static s32 s_Step = 1;
 static u32 s_BotMask = 0;
@@ -253,7 +257,9 @@ static void genetInit(void)
 
     e = getenv("GE_NET_HASHLOG");
     if (e && *e) {
-        s_HashLog = fopen(e, "w");
+        /* a relative path goes into the data folder ($S: Documents on iOS,
+         * the game's data_dir inside i64) */
+        s_HashLog = fopen(e[0] == '/' ? e : sysResolvePathRel(e), "w");
         if (!s_HashLog) {
             fprintf(stderr, "genet: cannot open hash log %s\n", e);
         }
@@ -275,6 +281,13 @@ int genetSessionSeed(u64 *out)
     if (!s_Online || !s_HaveSeed) return 0;
     *out = s_Seed;
     return 1;
+}
+
+static const char *sysResolvePathRel(const char *rel)
+{
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "$S/%s", rel);
+    return sysResolvePath(tmp);
 }
 
 int genetOnline(void)
@@ -310,6 +323,11 @@ static u64 genetStateHash(void)
     HASHV(g_GlobalTimer);
     HASHV(currentFrameCounter);
     HPART("seeds");
+    if (s_HDetail) {
+        netLog("  values rng %016llx chrobj %016llx timer %lld frames %lld",
+               (unsigned long long)g_randomSeed, (unsigned long long)g_chrObjRandomSeed,
+               (long long)g_GlobalTimer, (long long)currentFrameCounter);
+    }
     HASHV(g_StageNum);
     HASHV(current_menu);
     HASHV(menu_update);
@@ -631,6 +649,14 @@ static void startSession(void)
 
     s_Online = 1;
     s_Determ = 1; /* online play is always fixed-step */
+    {
+        /* Game.SkipIntro changes the boot sequence: off on every machine
+         * (the player's value comes back in genetShutdown) */
+        extern s32 portSkipIntro;
+        s_SavedSkipIntro = portSkipIntro;
+        portSkipIntro = 0;
+        s_SkipIntroSaved = 1;
+    }
     inputNetPure(1);
     netLog("connected as player %d (%s, input delay %u, seed %016llx%s)", s_Local + 1,
            s_Rollback ? "rollback in matches, lockstep in menus" : "lockstep", n64net_input_get_delay(s_Net),
@@ -807,6 +833,11 @@ static int externalTest(const char *role)
 
 void genetShutdown(void)
 {
+    if (s_SkipIntroSaved) {
+        extern s32 portSkipIntro;
+        portSkipIntro = s_SavedSkipIntro;
+        s_SkipIntroSaved = 0;
+    }
     if (s_Online && !s_Offline) {
         for (int i = 0; i < 3; i++) sendHandshake(HS_BYE);
     }
@@ -1393,10 +1424,21 @@ static void frameBoundary(void)
  * Taken at the frame boundary (and after each resimulated tick); written to
  * GE_NET_HASHLOG and sent as sync checks only once final: the state before
  * tick k is final when every input up to k-1 is confirmed. */
+/* GE_NET_HASHLOG_VALUES=1: the hash log also gets the raw values behind the
+ * "seeds" and "timers+menu" parts (desync forensics across machines) */
+static char s_HashVals[HASH_RING][96];
+static int s_HashValsOn = -1;
+
 static void storeHash(u32 tick)
 {
     s_HashRing[tick % HASH_RING] = genetStateHash();
     s_HashRingTick[tick % HASH_RING] = tick + 1;
+    if (s_HashValsOn < 0) s_HashValsOn = envStr("GE_NET_HASHLOG_VALUES") != NULL;
+    if (s_HashValsOn) {
+        snprintf(s_HashVals[tick % HASH_RING], sizeof(s_HashVals[0]), " rng %llx chr %llx t %d f %d st %d m %d/%d",
+                 (unsigned long long)g_randomSeed, (unsigned long long)g_chrObjRandomSeed, (int)g_GlobalTimer,
+                 (int)currentFrameCounter, (int)g_StageNum, (int)current_menu, (int)menu_update);
+    }
 }
 
 static void flushHashes(u32 limit)
@@ -1408,7 +1450,7 @@ static void flushHashes(u32 limit)
         }
         const u64 h = s_HashRing[slot];
         if (s_HashLog) {
-            fprintf(s_HashLog, "%ld %016llx\n", k, (unsigned long long)h);
+            fprintf(s_HashLog, "%ld %016llx%s\n", k, (unsigned long long)h, s_HashValsOn > 0 ? s_HashVals[slot] : "");
             if ((k & 63) == 0) fflush(s_HashLog);
         }
         if (s_Online && !s_Offline && s_Net && k % SYNC_EVERY == 0) {
@@ -1564,8 +1606,14 @@ int genetStageExit(void)
 
 /* Called from waitForNextFrame (game thread) in fixed-step mode: waits for
  * the next slot of the schedule and returns the tick count for this frame. */
+/* forensics (random.c GE_NET_RNGTRACE) */
+static void *s_GameThread;
+u32 genetTick(void) { return s_Tick; }
+void *genetGameThread(void) { return s_GameThread; }
+
 s32 genetFrameTicks(void)
 {
+    s_GameThread = (void *)pthread_self();
     genetInit();
     frameBoundary();
     rollbackPoint();

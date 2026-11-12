@@ -78,10 +78,44 @@ static void randomDrawLog(void)
 }
 #endif /* PORT */
 
+#ifdef PORT
+/* GE_NET_RNGTRACE=<from>:<to>: log every draw in that genet tick range with
+ * its caller (image-relative) and whether it ran on the game thread
+ * (cross-machine desync forensics). */
+#include <pthread.h>
+extern u32 genetTick(void);
+extern void *genetGameThread(void);
+extern uintptr_t sysImageBase(void);
+extern void sysLogPrintf(int level, const char *fmt, ...);
+static void randomTrace(void *ra)
+{
+    static int s_on = -1;
+    static u32 s_from, s_to;
+    if (s_on < 0) {
+        const char *e = getenv("GE_NET_RNGTRACE");
+        s_on = 0;
+        if (e && *e) {
+            s_from = (u32)atoi(e);
+            const char *c = e;
+            while (*c && *c != ':') c++;
+            s_to = *c ? (u32)atoi(c + 1) : s_from;
+            s_on = 1;
+        }
+    }
+    if (!s_on) return;
+    u32 t = genetTick();
+    if (t < s_from || t > s_to) return;
+    const int game = genetGameThread() == (void *)pthread_self();
+    sysLogPrintf(2, "RNG t=%u %s ra=+%lx", t, game ? "game" : "OTHER",
+                 (unsigned long)((uintptr_t)ra - sysImageBase()));
+}
+#endif
+
 u32 randomGetNext(void)
 {
 #ifdef PORT
     randomDrawLog();
+    randomTrace(__builtin_return_address(0));
 #endif
     u64 a0 = g_randomSeed;
     u64 a1, a2;

@@ -234,6 +234,18 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
   `SEQ="ge007-us:2400" EXTRA_ENV="GE_NET_BOT=1" i64/scripts/pair-test.sh` (data folders with the module + game
   data): connected as players 1/2 with i64's seed, **60/60 sync checks matched both sides**, rtt 8 ms. Host stalled
   7.8 s over 30 s (guest 0): to look at (probably the host waiting while the guest boots).
+- **Mac <-> iPhone 14 Pro online through i64 (2026-11-12): IN SYNC** after a fix. Before: desyncs at varying ticks
+  (661, 690, 1350...). Found with `GE_NET_HASHLOG=hash.txt` (relative = the game's data folder, also on iOS) +
+  `GE_NET_HASHLOG_VALUES=1` (raw RNG/timer/stage/menu per line) + `GE_NET_RNGTRACE=<from>:<to>` (every RNG draw
+  with its image-relative caller and thread): the Mac's shot made an explosion (explosionCreate) where the phone's
+  hit an object (objHit), both via `bullet_path_from_screen_center`: the **window aspect and FOV settings feed the
+  aim ray** (PD had the same bug). Fix (video.c): online the game sees a fixed 16:9 view at the default FOV
+  settings (`simAspect/simNativeWS/simWSAuto/simFovScale`, AIWideView off, room pool without the draw-distance
+  terms) and the picture is letterboxed to 16:9; Game.SkipIntro is off for the session (restored at shutdown).
+  After: 2817 ticks of per-frame hashes compared, 0 mismatches; 60/60 sync checks both sides (bots shooting).
+  Mac<->phone test script: session scratchpad `phonepair.sh` (local room server 7790, Mac i64 hosts, the 14 Pro
+  joins via devicectl env). Known: the module never saves ge007.ini (soak-mode rule); in-game option changes
+  inside i64 are lost: save on stop is still to do.
 - **Pause:** `n64_game_set_paused` -> `g_portHostPaused`. Offline the game thread waits at its per-frame
   gfxFrameMsgQ receive (port layer); online genet's away handling (awayNow) holds and tells the other player. Both
   give way to the re-entry shutdown. Tested: `I64_TEST_PAUSE=300:3` offline, resume, stop.

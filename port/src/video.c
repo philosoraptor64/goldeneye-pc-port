@@ -282,10 +282,22 @@ s32 portHudScalePercent(void)
     return cfgHudScale;
 }
 
+/* Online every machine must simulate the same view: the aspect and FOV feed
+ * the aim ray (bullet_path_from_screen_center) and AI awareness, so a Mac
+ * window and an iPhone screen hit different things (desync at the first
+ * shot, found Mac <-> iPhone 14 Pro in i64). In a session the game sees a
+ * fixed 16:9 view at the default FOV settings (the picture is letterboxed to
+ * match, videoOutputAspect), whatever each player's window or settings. */
+extern int genetOnline(void);
+static f32 simAspect(void) { return genetOnline() ? (16.0f / 9.0f) : gfx_current_dimensions.aspect_ratio; }
+static int simNativeWS(void) { return genetOnline() ? 1 : cfgNativeWidescreen; }
+static int simWSAuto(void) { return genetOnline() ? 1 : cfgWidescreenAuto; }
+static f32 simFovScale(void) { return genetOnline() ? 1.0f : portFovScale; }
+
 f32 portNativeAspect(void)
 {
-    f32 a = gfx_current_dimensions.aspect_ratio;
-    if (!cfgNativeWidescreen || a < 0.01f) {
+    f32 a = simAspect();
+    if (!simNativeWS() || a < 0.01f) {
         return 0.0f;
     }
     if (a < 0.5f) { a = 0.5f; }
@@ -305,12 +317,11 @@ f32 portScaleFovY(f32 fovy, s32 isTitleScreen)
          * the projection aspect; the Phase-4 vertical boost below was the
          * stretch-era compensation and would double-count, so it is skipped
          * (vertical FOV stays the game's, as in the PD port). */
-        if (cfgWidescreenAuto && !cfgNativeWidescreen &&
-            gfx_current_dimensions.aspect_ratio > 0.01f) {
-            fovy *= sqrtf(gfx_current_dimensions.aspect_ratio / (4.0f / 3.0f));
+        if (simWSAuto() && !simNativeWS() && simAspect() > 0.01f) {
+            fovy *= sqrtf(simAspect() / (4.0f / 3.0f));
         }
-        if (portFovScale > 0.4f && portFovScale < 2.01f && portFovScale != 1.0f) {
-            fovy *= portFovScale;
+        if (simFovScale() > 0.4f && simFovScale() < 2.01f && simFovScale() != 1.0f) {
+            fovy *= simFovScale();
         }
     }
     if (fovy > 160.0f)    { fovy = 160.0f; }
@@ -355,12 +366,11 @@ f32 portLodScaleOwnFov(void)
 f32 portFovYScaleFactor(void)
 {
     f32 k = 1.0f;
-    if (cfgWidescreenAuto && !cfgNativeWidescreen &&
-        gfx_current_dimensions.aspect_ratio > 0.01f) {
-        k *= sqrtf(gfx_current_dimensions.aspect_ratio / (4.0f / 3.0f));
+    if (simWSAuto() && !simNativeWS() && simAspect() > 0.01f) {
+        k *= sqrtf(simAspect() / (4.0f / 3.0f));
     }
-    if (portFovScale > 0.4f && portFovScale < 2.01f && portFovScale != 1.0f) {
-        k *= portFovScale;
+    if (simFovScale() > 0.4f && simFovScale() < 2.01f && simFovScale() != 1.0f) {
+        k *= simFovScale();
     }
     return k;
 }
@@ -369,7 +379,7 @@ f32 portFovYScaleFactor(void)
  * widest view (16:9 at the game's own FOV) when the window is wider or
  * FovScale > 100; 1 = AI sees the full rendered view (the PD-port model). */
 static int cfgAIWideView = 0;
-int portAIWideView(void) { return cfgAIWideView; }
+int portAIWideView(void) { return genetOnline() ? 0 : cfgAIWideView; }
 
 /* D443 (D357): horizontal FOV in degrees for a Video.FovScale percent, for the
  * settings display only. Mirrors portScaleFovY + the gameplay projection:
@@ -529,14 +539,21 @@ f32 portRoomPoolScale(void)
         return scale;
     }
 
-    t = portFovScale;
+    t = simFovScale();
     /* D334: native widescreen widens the horizontal frustum too (via the
      * projection aspect instead of the vertical boost), so it admits the same
      * extra side rooms and keeps the pool bump. */
-    if ((cfgWidescreenAuto || cfgNativeWidescreen) && gfx_current_dimensions.aspect_ratio > 0.01f) {
-        t *= sqrtf(gfx_current_dimensions.aspect_ratio / (4.0f / 3.0f));
+    if ((simWSAuto() || simNativeWS()) && simAspect() > 0.01f) {
+        t *= sqrtf(simAspect() / (4.0f / 3.0f));
     }
     if (t > scale) { scale = t; }
+    if (genetOnline()) {
+        /* the room pool is game memory: the same on every machine (draw
+         * distance settings left out online) */
+        if (scale > 2.5f) { scale = 2.5f; }
+        if (scale < 1.0f) { scale = 1.0f; }
+        return ceilf(scale * 4.0f - 0.01f) / 4.0f;
+    }
 
     /* D294 follow-up (2026-09-22): linear terms + a 3.0 cap were tried to
      * cover Statue's full 487 KB room set, but that build corrupted model
@@ -1403,6 +1420,7 @@ void videoDestroy(void)
 extern int get_screen_ratio(void);
 static float videoOutputAspect(void)
 {
+    if (genetOnline()) return 16.0f / 9.0f;   /* the simulated view (simAspect) */
     switch (cfgAspectMode) {
     case 1:   /* Original: the console's own shape */
         return get_screen_ratio() == 1 /* SCREEN_RATIO_16_9 */ ? (16.0f / 9.0f) : (4.0f / 3.0f);
