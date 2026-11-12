@@ -178,6 +178,7 @@ typedef struct PortThread {
     unsigned long tid;  /* OS thread id (thread dumps) */
     int started;        /* osStartThread called */
     int exited;         /* entry returned / stopped / parked (idle) */
+    volatile int alive; /* R1: the host thread is running (cleared as it leaves) */
 } PortThread;
 
 static PortThread g_pt[PORT_MAX_THREADS];
@@ -193,6 +194,18 @@ typedef struct PortQueue {
 
 static PortQueue g_pq[PORT_MAX_QUEUES];
 static int g_pqCount = 0;
+
+/* R1 (i64 re-entry): orderly stop of every port thread (portShutdownThreads).
+ * Port threads (the N64 threads, the tick thread, the render worker) leave at
+ * their next blocking point once g_portQuit is set; other threads (SDL's
+ * audio callback, the host) just see a failed non-blocking result. */
+volatile int g_portQuit = 0;
+static __thread int t_isPortThread = 0;
+static pthread_t s_tickTh, s_rwTh;
+static int s_tickStarted = 0, s_rwStarted = 0;
+static volatile int s_tickAlive = 0, s_rwAlive = 0;
+static int portQuitting(void) { return __atomic_load_n(&g_portQuit, __ATOMIC_ACQUIRE) != 0; }
+static void portThreadQuitExit(void) __attribute__((noreturn));
 
 /* Heartbeat: if no frame has rendered for a while, dump thread + queue
  * states so a hang shows up in the log instead of as a silent
@@ -309,7 +322,8 @@ static void portHeartbeatCheck(void)
 static void *portTickThread(void *arg)
 {
     (void)arg;
-    for (;;) {
+    t_isPortThread = 1;
+    while (!portQuitting()) {
         /* GE_DETERM (§D117, M-52 2nd attempt): retrace generation lives in
          * osRecvMesg() now (see there) -- synchronous with the sole
          * consumer asking for the next message, not paced by this thread.
@@ -353,6 +367,7 @@ static void *portTickThread(void *arg)
         portServiceTimers();
         portHeartbeatCheck();
     }
+    s_tickAlive = 0;
     return NULL;
 }
 
@@ -389,11 +404,11 @@ void portKernelInit(void)
         }
     }
 
-    pthread_t th;
-    if (pthread_create(&th, NULL, portTickThread, NULL) != 0) {
+    s_tickAlive = 1;
+    if (pthread_create(&s_tickTh, NULL, portTickThread, NULL) != 0) {
         sysFatalError("portKernelInit: pthread_create(tick) failed");
     }
-    pthread_detach(th);
+    s_tickStarted = 1;   /* joined by portShutdownThreads (R1) */
 }
 
 /* ------------------------------------------------------------------------ */
@@ -406,6 +421,7 @@ void imThreadExitRelease(void);   /* D152: defined in the interrupt-mask section
 static void *portThreadWrapper(void *arg)
 {
     PortThread *pt = (PortThread *)arg;
+    t_isPortThread = 1;
 
 #if defined(PLATFORM_WINDOWS)
     pt->tid = GetCurrentThreadId();
@@ -418,7 +434,8 @@ static void *portThreadWrapper(void *arg)
      * park it instead. */
     if (pt->id == 1 /* IDLE_THREAD_ID */) {
         pt->exited = 1;
-        for (;;) sysSleep(1000000);
+        while (!portQuitting()) sysSleep(10000);
+        pt->alive = 0;
         return NULL;
     }
 
@@ -426,7 +443,25 @@ static void *portThreadWrapper(void *arg)
     imThreadExitRelease();   /* D152: don't leak an OS_IM_NONE section on exit */
     pt->exited = 1;
     if (pt->os) pt->os->state = OS_STATE_STOPPED;
+    pt->alive = 0;
     return NULL;
+}
+
+/* R1: a port thread leaving at a blocking point during portShutdownThreads.
+ * Called with no port lock held. */
+static void portThreadQuitExit(void)
+{
+    imThreadExitRelease();
+    pthread_t self = pthread_self();
+    for (int i = 0; i < PORT_MAX_THREADS; ++i) {
+        if (g_pt[i].started && pthread_equal(g_pt[i].th, self)) {
+            g_pt[i].exited = 1;
+            g_pt[i].alive = 0;
+        }
+    }
+    if (pthread_equal(self, s_rwTh) && s_rwStarted) s_rwAlive = 0;
+    if (pthread_equal(self, s_tickTh) && s_tickStarted) s_tickAlive = 0;
+    pthread_exit(NULL);
 }
 
 void osCreateThread(OSThread *t, OSId id, void (*entry)(void *), void *arg,
@@ -510,6 +545,7 @@ void osStartThread(OSThread *t)
     PortThread *pt = portFind(t);
     if (!pt || pt->started) return;
     pt->started = 1;
+    pt->alive = 1;
     t->state = OS_STATE_RUNNABLE;
 
     pthread_attr_t attr;
@@ -551,6 +587,7 @@ void osDestroyThread(OSThread *t)
 
 void osYieldThread(void)
 {
+    if (t_isPortThread && portQuitting()) portThreadQuitExit();   /* R1 */
     /* GE rarely yields explicitly; a 1 ms sleep is a fine host equivalent
      * (sched_yield() would need MinGW's <sched.h>, which the game's own
      * src/sched.h shadows on the include path). */
@@ -660,6 +697,11 @@ s32 osSendMesg(OSMesgQueue *mq, OSMesg msg, s32 flag)
             pthread_mutex_unlock(&pq->lock);
             return -1;
         }
+        if (portQuitting()) {   /* R1 */
+            pthread_mutex_unlock(&pq->lock);
+            if (t_isPortThread) portThreadQuitExit();
+            return -1;
+        }
         pthread_cond_wait(&pq->cond, &pq->lock);
     }
     mq->msg[(mq->first + mq->validCount) % mq->msgCount] = msg;
@@ -673,11 +715,17 @@ extern OSMesgQueue gfxFrameMsgQ; /* src/init.c */
 
 s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
 {
+    if (t_isPortThread && portQuitting()) portThreadQuitExit();   /* R1 */
     PortQueue *pq = portQueueGet(mq);
     pthread_mutex_lock(&pq->lock);
     while (mq->validCount == 0) {
         if (flag != OS_MESG_BLOCK) {
             pthread_mutex_unlock(&pq->lock);
+            return -1;
+        }
+        if (portQuitting()) {   /* R1 */
+            pthread_mutex_unlock(&pq->lock);
+            if (t_isPortThread) portThreadQuitExit();
             return -1;
         }
         /* GE_DETERM (§D117, M-52 2nd attempt): __scMain (sched.c) is the
@@ -1966,10 +2014,16 @@ static void portInterpPresentBeforeDraw(uint64_t viUs)
 static void *portRenderWorker(void *arg)
 {
     (void)arg;
+    t_isPortThread = 1;
     for (;;) {
         int presentDue = 0;
         pthread_mutex_lock(&s_rwLock);
         while (s_rwTask == NULL) {
+            if (portQuitting()) {   /* R1: idle = a safe exit point */
+                pthread_mutex_unlock(&s_rwLock);
+                s_rwAlive = 0;
+                return NULL;
+            }
             /* Quit while idle: stop taking frames and never touch GL again.
              * The host only waits for the renderer while it is inside a frame
              * (video.c videoHostExitIfRequested), so an idle worker is already
@@ -2093,8 +2147,10 @@ static int portRenderWorkerOn(void)
 #else
             pthread_attr_setstacksize(&attr, PORT_THREAD_STACK);
 #endif
+            s_rwAlive = 1;
             if (pthread_create(&th, &attr, portRenderWorker, NULL) == 0) {
-                pthread_detach(th);
+                s_rwTh = th;          /* joined by portShutdownThreads (R1) */
+                s_rwStarted = 1;
                 s_rwMode = 1;
                 sysLogPrintf(LOG_NOTE, "D481: render worker started");
             } else {
@@ -2125,6 +2181,11 @@ void osSpTaskStartGo(OSTask *t)
         if (s_rwTask != NULL) {
             sysLogPrintf(LOG_ERROR, "D481: gfx task submitted while the previous one is still rendering (invariant broken); waiting");
             while (s_rwTask != NULL) {
+                if (portQuitting()) {   /* R1: the render worker may be gone */
+                    pthread_mutex_unlock(&s_rwLock);
+                    if (t_isPortThread) portThreadQuitExit();
+                    return;
+                }
                 pthread_cond_wait(&s_rwCond, &s_rwLock);
             }
         }
@@ -2513,3 +2574,64 @@ void geTracePrintf(const char *path, const char *fmt, ...)
 
     __sync_lock_release(&geTraceLock);
 }
+
+
+/* ------------------------------------------------------------------------ */
+/* R1: orderly shutdown (i64 re-entry)                                       */
+/* ------------------------------------------------------------------------ */
+
+/* Stops every port thread: sets g_portQuit, keeps waking every queue, the
+ * render worker and the interrupt-mask waiters until each thread has left at
+ * a blocking point, then joins them (their stacks live in the address window,
+ * which the caller resets next). Returns 0, or -1 if a thread is still
+ * running after timeoutMs (then nothing may be torn down: its stack and the
+ * game memory are still in use). */
+int portShutdownThreads(int timeoutMs)
+{
+    __atomic_store_n(&g_portQuit, 1, __ATOMIC_RELEASE);
+    const uint64_t start = sysGetMicroseconds();
+    int left = 0;
+    for (;;) {
+        pthread_mutex_lock(&s_pqLock);
+        int nq = g_pqCount;
+        pthread_mutex_unlock(&s_pqLock);
+        for (int i = 0; i < nq; ++i) {
+            if (!g_pq[i].os) continue;
+            pthread_mutex_lock(&g_pq[i].lock);
+            pthread_cond_broadcast(&g_pq[i].cond);
+            pthread_mutex_unlock(&g_pq[i].lock);
+        }
+        pthread_mutex_lock(&s_rwLock);
+        pthread_cond_broadcast(&s_rwCond);
+        pthread_mutex_unlock(&s_rwLock);
+        pthread_mutex_lock(&s_imMx);
+        pthread_cond_broadcast(&s_imCv);
+        pthread_mutex_unlock(&s_imMx);
+
+        left = 0;
+        for (int i = 0; i < PORT_MAX_THREADS; ++i)
+            if (g_pt[i].started && g_pt[i].alive) left++;
+        if (s_tickStarted && s_tickAlive) left++;
+        if (s_rwStarted && s_rwAlive) left++;
+        if (!left) break;
+        if ((int)((sysGetMicroseconds() - start) / 1000) > timeoutMs) {
+            for (int i = 0; i < PORT_MAX_THREADS; ++i)
+                if (g_pt[i].started && g_pt[i].alive)
+                    sysLogPrintf(LOG_ERROR, "shutdown: N64 thread id %d still running", (int)g_pt[i].id);
+            if (s_tickStarted && s_tickAlive) sysLogPrintf(LOG_ERROR, "shutdown: tick thread still running");
+            if (s_rwStarted && s_rwAlive) sysLogPrintf(LOG_ERROR, "shutdown: render worker still running");
+            return -1;
+        }
+        sysSleep(2000);
+    }
+    for (int i = 0; i < PORT_MAX_THREADS; ++i)
+        if (g_pt[i].started) pthread_join(g_pt[i].th, NULL);
+    if (s_tickStarted) pthread_join(s_tickTh, NULL);
+    if (s_rwStarted) pthread_join(s_rwTh, NULL);
+    sysLogPrintf(LOG_INFO, "shutdown: all port threads stopped (%u ms)",
+                 (unsigned)((sysGetMicroseconds() - start) / 1000));
+    return 0;
+}
+
+/* R1: frames presented since this start (the soak harness stops on it). */
+int portFramesRendered(void) { return g_framesRendered; }

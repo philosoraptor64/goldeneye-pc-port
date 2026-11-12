@@ -130,7 +130,20 @@ void portAllUnlockedApply(void)
 #endif
 }
 
-int main(int argc, char **argv)
+/* R1 (i64 re-entry): see geMain() at the end of this file. */
+#include "reentry.h"
+extern int portShutdownThreads(int timeoutMs);
+extern void portAddrResetWindow(void);
+extern int portFramesRendered(void);
+extern void sysLogShutdown(void);
+extern void gfx_sdl_teardown_for_exit(void);
+extern int setenv(const char *name, const char *value, int overwrite);
+
+/* One start of the game. Without soak it never returns on success (the host
+ * loop below runs until the process exits); with soak it returns 0 after
+ * GE_SOAK_FRAMES presented frames, leaving everything running for
+ * geShutdownOnce(). */
+static int geMainOnce(int argc, char **argv, int soak, int cycle)
 {
     sysSetArgs(argc, argv);
 
@@ -182,7 +195,9 @@ int main(int argc, char **argv)
     configLoad();
     videoApplySteamDeckPreset();
     updateCheckStart();   /* opt-in (Game.CheckUpdates, default off); no-op otherwise */
-    atexit(portAtExit);   /* persist config + window geometry on clean exit */
+    /* persist config + window geometry on clean exit. Not in soak tests:
+     * after a re-entry restore it would save the defaults over ge007.ini. */
+    if (!soak) atexit(portAtExit);
 
     /* 1a. D257: Game.AllUnlocked (default OFF; F10 'All unlocked' enables)
      *     -- when set, seed the game's own RAM unlock flags so mission
@@ -203,6 +218,12 @@ int main(int argc, char **argv)
 
     /* Netplay (port/src/genet.c): connect before the game picks its random
      * seed and reads the save, so both machines start from the same state. */
+    if (soak && getenv("GE_SOAK_HASHLOG")) {
+        /* per-cycle state hash log: <base>.<cycle> */
+        char hl[1024];
+        snprintf(hl, sizeof(hl), "%s.%d", getenv("GE_SOAK_HASHLOG"), cycle);
+        setenv("GE_NET_HASHLOG", hl, 1);
+    }
     genetConnect();
 
     /* 2. Load the ROM and map segments. */
@@ -287,9 +308,15 @@ int main(int argc, char **argv)
 
     /* 5. Host thread: pump SDL events until the window is closed / ESC.
      *    videoPumpEvents() exits the process on quit. */
-    for (;;) {
-        videoPumpEvents();
-        sysSleep(8);
+    {
+        const char *sf = getenv("GE_SOAK_FRAMES");
+        const int stopAt = soak ? (sf && *sf ? atoi(sf) : 600) : 0;
+        for (;;) {
+            videoPumpEvents();
+            sysSleep(8);
+            if (soak && portFramesRendered() >= stopAt)
+                return 0;
+        }
     }
 
     /* Unreachable in practice; clean up if we ever get here. */
@@ -300,5 +327,57 @@ int main(int argc, char **argv)
     romdataDestroy();
     configSave();
 
+    return 0;
+}
+
+/* R1: undo one start, in reverse order: every port thread stops at a blocking
+ * point and is joined, then audio/input/video/ROM are released and the address
+ * window is emptied. The caller then restores the globals. Returns 0, or -1
+ * if a thread would not stop (then nothing else may be torn down). */
+static int geShutdownOnce(void)
+{
+    if (portShutdownThreads(3000) != 0)
+        return -1;
+    audioDestroy();
+    mixerDestroy();
+    inputDestroy();
+    videoDestroy();
+    gfx_sdl_teardown_for_exit();
+    romdataDestroy();
+    genetShutdown();
+    portAddrResetWindow();
+    sysLogPrintf(LOG_INFO, "shutdown: done");
+    sysLogShutdown();
+    return 0;
+}
+
+/* GE_SOAK=<n>: start, run GE_SOAK_FRAMES frames, shut down, restore the
+ * globals, n times in one process (the i64 module's start/stop cycle).
+ * GE_SOAK_HASHLOG=<base> writes each cycle's GE_NET_HASHLOG to <base>.<i>
+ * (use with GE_NET_DETERM=1 GE_RSEED=<hex>: every cycle must match). */
+int main(int argc, char **argv)
+{
+    reentrySavePristine();   /* before any game code runs */
+    const char *sv = getenv("GE_SOAK");
+    const int cycles = sv && *sv ? atoi(sv) : 0;
+    if (cycles <= 0)
+        return geMainOnce(argc, argv, 0, 0);
+    for (int c = 0; c < cycles; c++) {
+        int rc = geMainOnce(argc, argv, 1, c);
+        if (rc != 0) {
+            fprintf(stderr, "soak: start %d failed (%d)\n", c, rc);
+            return rc;
+        }
+        if (geShutdownOnce() != 0) {
+            fprintf(stderr, "soak: shutdown %d failed (a thread would not stop)\n", c);
+            return 3;
+        }
+        reentryRestorePristine();
+        unsigned long copiedKb, zeroKb, fpKb;
+        unsigned int threads;
+        reentryStats(&copiedKb, &zeroKb, &fpKb, &threads);
+        fprintf(stderr, "soak: cycle %d done: footprint %lu MB, %u threads (restored %lu KB, zeroed %lu KB)\n",
+                c, fpKb / 1024, threads, copiedKb, zeroKb);
+    }
     return 0;
 }

@@ -44,6 +44,11 @@
 uintptr_t g_portImageBase = 0;
 int g_portUseImageRel = 0;
 
+#include "reentry.h"
+/* R1: the regions stay reserved across re-entry cycles (portAddrResetWindow
+ * swaps their contents for fresh reservations); survives the globals reset. */
+GE_KEEP static int s_windowReserved = 0;
+
 /* Defined by port/src/dram_syms*.s; must equal PORT_ADDR_BASE + 0x70000000. */
 extern unsigned char cfb_16[];
 
@@ -182,7 +187,7 @@ void portAddrInit(void)
     g_portUseImageRel = (g_portImageBase >= (uintptr_t)PORT_ADDR_WINDOW) ? 1 : 0;
 
 #if PORT_ADDR_BASE != 0
-    {
+    if (!s_windowReserved) {
         /* Non-clobbering: VM_FLAGS_FIXED without VM_FLAGS_OVERWRITE fails with
          * KERN_NO_SPACE if the range is already in use, rather than silently
          * replacing a live mapping (mmap MAP_FIXED on macOS does the latter). */
@@ -211,6 +216,9 @@ void portAddrInit(void)
         }
         sysLogPrintf(LOG_INFO, "portAddr: reserved %llu MB of address space in %d regions",
                      total >> 20, (int)(sizeof(regions) / sizeof(regions[0])));
+        s_windowReserved = 1;
+    } else {
+        sysLogPrintf(LOG_INFO, "portAddr: window still reserved (re-entry)");
     }
 #endif
 
@@ -233,5 +241,31 @@ void portAddrInit(void)
 
 #ifdef PORT_ADDR_STRICT
     portAddrStrictSelfTest();
+#endif
+}
+
+
+/* R1 (i64 re-entry): after every port thread has stopped, replace everything
+ * mapped in the window (DRAM views, the ROM image, thread stacks) with fresh
+ * PROT_NONE reservations in one step each (VM_FLAGS_OVERWRITE: no moment in
+ * which the range is free for someone else to take). The next start maps
+ * DRAM, the ROM and stacks again as on first boot. */
+void portAddrResetWindow(void)
+{
+#if PORT_ADDR_BASE != 0
+    static const struct { unsigned long long off, size; } regions[] = {
+        { PORT_CART_OFF,          PORT_CART_RESERVE },
+        { 0x70000000ULL,          PORT_DRAM_SIZE },
+        { 0x80000000ULL,          PORT_DRAM_SIZE },
+        { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE },
+    };
+    for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
+        mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
+        kern_return_t kr = mach_vm_map(mach_task_self(), &addr, (mach_vm_size_t)regions[i].size, 0,
+                                       VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, FALSE,
+                                       VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+        if (kr != KERN_SUCCESS)
+            sysFatalError("portAddr: cannot reset region %d (%s)", (int)i, mach_error_string(kr));
+    }
 #endif
 }

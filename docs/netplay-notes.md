@@ -179,3 +179,20 @@ Caveats: the probe ran inside PD after PD's own allocations (16 MB heap + 32 MB 
 differently: reserve the window first thing in main (port_addr.c) and log vm_region on failure. Re-probe on the Duo
 (iPhone19,4, more RAM) when it's back. Next: G1 device build with this base, sign (stub profile, existing cert),
 copy ROM + pcmodels/pccg sidecars to Documents, boot.
+
+## Re-entry (R1, MacBook, 2026-11-12): start/stop several times in one process
+For the i64 module (start/stop while the app keeps running). `GE_SOAK=<n> GE_SOAK_FRAMES=<f>` runs
+start -> f frames -> shutdown -> restore n times in one process; `GE_SOAK_HASHLOG=<base>` (+ `GE_NET_DETERM=1
+GE_RSEED=<hex>`) writes each cycle's state hashes to `<base>.<i>`.
+- Threads (libultra.c `portShutdownThreads`): `g_portQuit` makes every port thread (N64 threads, tick thread,
+  render worker; marked thread-local) leave at its next blocking point (osRecvMesg/osSendMesg waits, osYieldThread,
+  the render worker's idle wait, the scheduler's wait for the previous frame); the shutdown keeps waking every queue
+  until all are gone, then joins them (tick thread and render worker are no longer detached). Non-port threads
+  (SDL audio) only see a failed call.
+- Then audio/input/video (gfx_destroy + window/Metal view), ROM, genet are released; `portAddrResetWindow`
+  replaces the window's 4 regions with fresh PROT_NONE reservations (VM_FLAGS_OVERWRITE, the window stays ours);
+  `port/hostlib/reentry.c` restores __DATA (__data/__bss/__common) **and the __GESNAP segment** (the decomp's
+  globals) to their bytes at the top of main. Survivors: GE_KEEP (__DATA,__gekeep).
+- No ge007.ini save in soak mode (it would write the restored defaults).
+- Result (Mac, GL): 3 x 300 frames, threads stop in ~17 ms, 7 threads after each cycle, **per-cycle hash logs
+  identical** (300 distinct hashes). Footprint grows ~17 MB/cycle (renderer caches/GL objects not freed yet).

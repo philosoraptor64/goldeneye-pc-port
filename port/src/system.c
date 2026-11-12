@@ -4,6 +4,7 @@
  * Modelled on the PD port's port/src/system.c.
  */
 
+#include "reentry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,13 @@ static void sysLogWriteFile(const char *line)
     fflush(g_logFile);
 }
 
+/* R1: close the log before a re-entry restore (it is reopened, appending, by
+ * the next start). */
+void sysLogShutdown(void)
+{
+    sysLogCloseFile();
+}
+
 void sysLogOpenFile(void)
 {
     char logpath[1024], prevpath[1024];
@@ -179,10 +187,14 @@ void sysLogOpenFile(void)
     prevpath[sizeof(prevpath) - 1] = 0;
 
     /* Roll the previous run's log to ge007.prev.log (drop any older
-     * one first); failures are ignored (std C has no portable stat). */
-    remove(prevpath);
-    rename(logpath, prevpath);
-    g_logFile = fopen(logpath, "w");
+     * one first); failures are ignored (std C has no portable stat).
+     * R1: later starts in the same process (re-entry) append instead. */
+    static GE_KEEP int s_logOpens = 0;
+    if (s_logOpens++ == 0) {
+        remove(prevpath);
+        rename(logpath, prevpath);
+    }
+    g_logFile = fopen(logpath, s_logOpens > 1 ? "a" : "w");
     if (!g_logFile) {
         /* Carry on with stderr only; at most one warn (no error spam). */
         sysLogPrintf(LOG_WARNING, "log: cannot open %s, stderr only", logpath);
@@ -190,7 +202,8 @@ void sysLogOpenFile(void)
     }
     g_logFileBytes = 0;
     g_logFileCapped = 0;
-    atexit(sysLogCloseFile);
+    if (s_logOpens == 1)
+        atexit(sysLogCloseFile);
 }
 
 void sysLogPrintf(enum LogLevel level, const char *fmt, ...)
