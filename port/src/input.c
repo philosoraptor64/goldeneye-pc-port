@@ -501,6 +501,12 @@ static int  padPreset[MAX_PADS] = {0};           /* D518: per-seat (Input.PadPre
  * (D498: declared here so the stick-style helpers below can read it.) */
 static int naturalPitchMode = 1;                 /* Input.NaturalPitch */
 static int controlScheme = 0;                    /* D513 Input.ControlScheme: 0 Modern (port forces the style), 1 OG (the game's own selection is honoured) */
+/* Netplay (port/src/genet.c): online, every machine must see only what travels
+ * in the N64 pad sample. inputNetPure(1) forces the Original scheme (D643: a
+ * strict virtual N64 pad, no port actions) and turns off mouse look and the
+ * keyboard's dedicated use/reload/crouch, which write game state directly
+ * (porting notes F2). inputNetPure(0) restores the player's settings. */
+static int s_netPure = 0;
 /* D513 accessor (#145): watchsettings.c gates D564's pin of the game's own
  * "Look up/down" value on this: in the Modern scheme the port's Invert
  * look rows own the inversion; in Original the game's watch setting is
@@ -2271,6 +2277,7 @@ static int inputCanUseGameplayActions(int menuMode)
  * from a gun selects the lowest gadget; the next press wraps the list. */
 static void inputCycleGadget(void)
 {
+    if (s_netPure) return;   /* netplay: no direct actions */
     if (inputMpSplit()) return;   /* D419: acts on g_CurrentPlayer; solo only */
     struct player *p = slotPlayer();
     if (!p || !p->ptr_inventory_first_in_cycle) return;
@@ -2581,6 +2588,7 @@ static unsigned inputComputePadSlot(int idx, signed char *stick_x, signed char *
         int reloadNow = scriptIsActive(0) ? scriptSlots[0].reload : (actHeld(ks, IA_RELOAD) || padReload);
         replayFetch();
         if (s_replayActive) { useNow = s_repCur.use; reloadNow = s_repCur.reload; }
+        if (s_netPure) { useNow = 0; reloadNow = 0; }   /* netplay: no direct actions */
         s_recUse = useNow; s_recReload = reloadNow;
         int playable = inputCanUseGameplayActions(menuMode);
         /* D407: on the N64 the B bit also drives bondview2.c's tank
@@ -2641,7 +2649,7 @@ static unsigned inputComputePadSlot(int idx, signed char *stick_x, signed char *
         }
         s_useHeldPrev = useNow;
         s_reloadHeldPrev = reloadNow;
-        crouchNow = actHeld(ks, IA_CROUCH);
+        crouchNow = s_netPure ? 0 : actHeld(ks, IA_CROUCH);
         if (actHeld(ks, IA_LEAN_L))
             button |= GE_CONT_L;
         if (actHeld(ks, IA_START))
@@ -3087,6 +3095,7 @@ static unsigned inputComputePadSlot(int idx, signed char *stick_x, signed char *
     }
 
     if (idx == 0 && scriptIsActive(0)) crouchNow = scriptSlots[0].crouch;
+    if (s_netPure) crouchNow = 0;   /* netplay: no direct stance writes */
 
     /* The GEPD preset's crouch key is independent of aim. Do not turn it
      * into C-down: outside aim C-down moves backwards in 1.2, and inside
@@ -4263,5 +4272,23 @@ PD_CONSTRUCTOR static void inputConfigInit(void)
         const char *def = kGepdPreset[a] ? kGepdPreset[a] : kBindDefs[a].def;
         strncpy(g_bindStr[a], def, sizeof(g_bindStr[a]) - 1);
         configRegisterString(kBindDefs[a].key, g_bindStr[a], sizeof(g_bindStr[a]));
+    }
+}
+
+/* Netplay: see s_netPure above. Called by genetConnect (on) and before the
+ * config is saved at exit (off), so the player's own settings are kept. */
+void inputNetPure(int on)
+{
+    static int savedScheme, savedMouse, savedPdMouse, saved = 0;
+    if (on && !s_netPure) {
+        savedScheme = controlScheme; savedMouse = mouseEnabled; savedPdMouse = pdMouseAim; saved = 1;
+        controlScheme = 1;
+        mouseEnabled = 0;
+        pdMouseAim = 0;
+        s_netPure = 1;
+        sysLogPrintf(LOG_INFO, "input: online -- Original controls, no mouse look or direct actions");
+    } else if (!on && s_netPure) {
+        if (saved) { controlScheme = savedScheme; mouseEnabled = savedMouse; pdMouseAim = savedPdMouse; }
+        s_netPure = 0;
     }
 }

@@ -57,6 +57,7 @@ extern s32 g_NumChrSlots;
 void joyPortLatestPad(s32 channel, OSContPad *out);  /* src/joy.c */
 void portEepromCopy(u8 *out);                        /* port/src/libultra.c */
 void portEepromAdopt(const u8 *in);
+void inputNetPure(int on);                           /* port/src/input.c */
 
 #define GENET_TICK_US   16667ULL
 #define GENET_EEP_SIZE  2048
@@ -482,6 +483,7 @@ int genetConnect(void)
 
     s_Online = 1;
     s_Determ = 1; /* online play is always fixed-step */
+    inputNetPure(1);
     netLog("connected as player %d (lockstep, input delay %u, seed %016llx)", s_Local + 1,
            n64net_input_get_delay(s_Net), (unsigned long long)s_Seed);
     return 1;
@@ -492,6 +494,7 @@ void genetShutdown(void)
     if (s_Online && !s_Offline) {
         for (int i = 0; i < 3; i++) sendHandshake(HS_BYE);
     }
+    if (s_Online) inputNetPure(0); /* the player's own control settings go back into the ini */
 }
 
 /* ---- input ----------------------------------------------------------- */

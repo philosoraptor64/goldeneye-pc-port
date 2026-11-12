@@ -7,7 +7,9 @@
 # Env:   FRAMES=3600 DELAY=2 MP=2,1 (GE_STARTMP: players,mpstage[,scenario]; empty = boot to the title)
 #        LATENCY/JITTER (ms) LOSS (%) on both sides; SERVER=local [ROOM=GETS RELAY=1] (local room server);
 #        DESYNC_TEST=<tick> (inject a desync on the guest: the run must report it);
-#        GUEST_LATE=<secs> (start the guest later); KILL_GUEST=<secs> (kill it: the host must play on)
+#        GUEST_LATE=<secs> (start the guest later); KILL_GUEST=<secs> (kill it: the host must play on);
+#        GUEST_SET="Video.FovScale=150 Window.Width=800" (the guest runs from its own folder with these
+#        settings changed in a copy of data/ge007.ini: online play must not depend on local settings)
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
@@ -33,11 +35,34 @@ else
     guestnet=(GE_NET_PEER=127.0.0.1:7501 GE_NET_PORT=7502)
 fi
 
+guestdir=$PWD
+if [ -n "${GUEST_SET:-}" ]; then
+    guestdir=$PWD/$out/guestroot; mkdir -p "$guestdir/data"
+    for f in data/*; do [ "$(basename "$f")" = ge007.ini ] || ln -s "$PWD/$f" "$guestdir/data/"; done
+    python3 - "$PWD/data/ge007.ini" "$guestdir/data/ge007.ini" $GUEST_SET <<'PY'
+import sys, re
+src, dst, sets = sys.argv[1], sys.argv[2], sys.argv[3:]
+lines = open(src).read().split("\n")
+for kv in sets:
+    key, val = kv.split("=", 1); sec, name = key.split(".", 1)
+    cur, done = None, False
+    for i, l in enumerate(lines):
+        m = re.match(r"\[(.*)\]", l.strip())
+        if m: cur = m.group(1); continue
+        if cur == sec and re.match(r"\s*" + re.escape(name) + r"\s*=", l):
+            lines[i] = f"{name} = {val}"; done = True
+    if not done: print("GUEST_SET: no key", key); sys.exit(1)
+open(dst, "w").write("\n".join(lines))
+PY
+    [ $? = 0 ] || exit 1
+    echo "guest settings: $GUEST_SET"
+fi
+
 env "${common[@]}" "${hostnet[@]}" GE_NET_HASHLOG="$out/host.hash" "$bin" > "$out/host.log" 2>&1 &
 hpid=$!
 sleep "${GUEST_LATE:-1}"
-env "${common[@]}" "${guestnet[@]}" GE_NET_HASHLOG="$out/guest.hash" ${DESYNC_TEST:+GE_NET_TEST_DESYNC=$DESYNC_TEST} \
-    "$bin" > "$out/guest.log" 2>&1 &
+(cd "$guestdir" && env "${common[@]}" "${guestnet[@]}" GE_NET_HASHLOG="$OLDPWD/$out/guest.hash" \
+    ${DESYNC_TEST:+GE_NET_TEST_DESYNC=$DESYNC_TEST} "$OLDPWD/$bin" > "$OLDPWD/$out/guest.log" 2>&1) &
 gpid=$!
 trap 'kill $hpid $gpid $spid 2>/dev/null' INT TERM
 if [ -n "${KILL_GUEST:-}" ]; then
