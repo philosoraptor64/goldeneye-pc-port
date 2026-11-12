@@ -15,7 +15,8 @@
 set -uo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
-bin=$(ls build-pc/ge007*.aarch64 build-pc/ge007*.x86_64 2>/dev/null | head -1)
+# BUILD=build-clang for rollback (snapshots need an Apple clang build; build-pc = GCC = lockstep)
+bin=$(ls ${BUILD:-build-pc}/ge007*.aarch64 ${BUILD:-build-pc}/ge007*.x86_64 2>/dev/null | head -1)
 [ -x "$bin" ] || { echo "build first (build-pc)"; exit 1; }
 FRAMES=${FRAMES:-3600}
 MP=${MP-2,1}

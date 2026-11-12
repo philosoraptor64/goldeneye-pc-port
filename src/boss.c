@@ -584,6 +584,9 @@ void bossMainloop(void)
         if(1); // regalloc
         if(1);
 
+#ifdef PORT
+port_stage_resume:
+#endif
         while (g_MainStageNum < 0 || pendingGfx != 0)
         {
 #ifdef PORT
@@ -858,6 +861,19 @@ void bossMainloop(void)
             }
         }
 
+#ifdef PORT
+        {
+            /* Netplay rollback (port/src/genet.c): a frame that ends the stage
+             * may have run on predicted input. Settle it before anything is
+             * unloaded; if the corrected replay no longer ends the stage, the
+             * stage goes on. */
+            extern int genetStageExit(void);
+            if (genetStageExit())
+            {
+                goto port_stage_resume;
+            }
+        }
+#endif
         lvlUnloadStageTextData();
         stop_demo_playback();
         mempNullNextEntryInBank(MEMPOOL_STAGE);

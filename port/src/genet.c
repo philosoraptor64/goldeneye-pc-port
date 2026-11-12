@@ -123,6 +123,20 @@ static int s_SyncTest = 0;       /* GE_SYNCTEST=N: rewind N frames every frame a
 static int s_SyncTestFrom = 120; /* GE_SYNCTEST_FROM: frames into a stage before testing */
 static u32 s_SyncChecks = 0, s_SyncMismatches = 0;
 
+/* online rollback (GE_NET_ROLLBACK, default on where snapshots exist) */
+#define RB_SLOTS 16
+#define HASH_RING 256
+static int s_Rollback = 0;
+static u32 s_RollbackWindow = 8;     /* GE_NET_ROLLBACK_WINDOW: ticks ahead of confirmed input */
+static u32 s_RollbackFrom = 60;      /* GE_NET_ROLLBACK_FROM: frames into a match before it opens */
+static int s_WindowOpen = 0;
+static u32 s_Rollbacks = 0, s_RollbackTicks = 0, s_MaxDepth = 0, s_Skips = 0;
+static int s_LoadWaited = 0;
+static u64 s_HashRing[HASH_RING];
+static u32 s_HashRingTick[HASH_RING];   /* tick + 1 (0 = empty) */
+static long s_LastFlushed = -1;
+extern s32 g_MainStageNum;             /* src/boss.c: >= 0 = the stage is ending */
+
 /* online */
 static int s_Online = 0;        /* a session was set up (connect succeeded) */
 static int s_IsHost = 0;
@@ -565,14 +579,23 @@ int genetConnect(void)
         cfg.send = netSend;
         cfg.log = netLogCb;
         s_Net = n64net_input_create(&cfg);
-        n64net_input_set_auto_delay(s_Net, cfg.input_delay, 6);
+        {
+            const char *r = envStr("GE_NET_ROLLBACK");
+            s_Rollback = !(r && atoi(r) == 0) && gesnapSupported();
+            if ((r = envStr("GE_NET_ROLLBACK_WINDOW"))) s_RollbackWindow = (u32)atoi(r);
+            if ((r = envStr("GE_NET_ROLLBACK_FROM"))) s_RollbackFrom = (u32)atoi(r);
+            /* snapshots are set up at the first frame (rollbackPoint): the
+             * audio heap they leave out is reported by the game's boot */
+        }
+        n64net_input_set_auto_delay(s_Net, cfg.input_delay, s_Rollback ? 3 : 6);
     }
 
     s_Online = 1;
     s_Determ = 1; /* online play is always fixed-step */
     inputNetPure(1);
-    netLog("connected as player %d (lockstep, input delay %u, seed %016llx)", s_Local + 1,
-           n64net_input_get_delay(s_Net), (unsigned long long)s_Seed);
+    netLog("connected as player %d (%s, input delay %u, seed %016llx)", s_Local + 1,
+           s_Rollback ? "rollback in matches, lockstep in menus" : "lockstep", n64net_input_get_delay(s_Net),
+           (unsigned long long)s_Seed);
     return 1;
 }
 
@@ -687,9 +710,7 @@ static void endTick(u32 tick, u64 hash)
         goOffline();
         return;
     }
-    if (tick % SYNC_EVERY == 0) {
-        n64net_sync_record(s_Net, tick, 0, (u32)(hash ^ (hash >> 32)));
-    }
+    (void)hash;
     if (!s_DesyncReported && n64net_sync_desynced(s_Net, &dtick, &dkind)) {
         s_DesyncReported = 1;
         netLog("DESYNC detected at tick %u", dtick);
@@ -697,10 +718,11 @@ static void endTick(u32 tick, u64 hash)
     if (tick % STATS_EVERY == 0 && tick > 0) {
         n64net_input_stats st;
         n64net_input_get_stats(s_Net, &st);
-        netLog("tick %u, sync checks matched %u%s, stalls %u (%.2f s), delay %u, rtt avg %u ms max %u ms",
+        netLog("tick %u, sync checks matched %u%s, stalls %u (%.2f s), delay %u, rtt avg %u ms max %u ms, "
+               "rollbacks %u (%u ticks, max %u), skips %u, save %.2f ms",
                tick, n64net_sync_matched(s_Net), s_DesyncReported ? " (DESYNC)" : "", s_Stalls,
                (double)s_StallUs / 1e6, n64net_input_get_delay(s_Net), st.rtt_avg_usecs / 1000,
-               st.rtt_max_usecs / 1000);
+               st.rtt_max_usecs / 1000, s_Rollbacks, s_RollbackTicks, s_MaxDepth, s_Skips, gesnapLastSaveMs());
     }
 }
 
@@ -806,6 +828,19 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
         for (int p = 0; p < MAXCONTROLLERS; p++) {
             samples[ridx].pads[p] = s_UsedPads[s_ResimTick % PAD_RING][p];
         }
+        if (s_Online && s_Net) {
+            /* rollback: the ledger's inputs (confirmed, or the newest prediction) */
+            for (int p = 0; p < s_NumPlayers; p++) {
+                n64net_pad n;
+                OSContPad *o = &samples[ridx].pads[p];
+                n64net_input_get(s_Net, p, s_ResimTick, &n);
+                o->button = n.buttons;
+                o->stick_x = n.stick_x;
+                o->stick_y = n.stick_y;
+                o->errno = 0;
+                s_UsedPads[s_ResimTick % PAD_RING][p] = *o;
+            }
+        }
         s_ResimTick++;
         return ridx;
     }
@@ -835,11 +870,7 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
             }
         }
     }
-    h = genetStateHash();
-    if (s_HashLog) {
-        fprintf(s_HashLog, "%u %016llx\n", tick, (unsigned long long)h);
-        if ((tick & 63) == 0) fflush(s_HashLog);
-    }
+    h = 0; /* hashes are taken at the frame boundary (recordHashes) */
 
     memset(pads, 0, sizeof(pads));
     if (s_Online) {
@@ -1073,12 +1104,178 @@ static void frameBoundary(void)
     }
 }
 
+/* ---- per-tick hashes (state before each tick) ----------------------------
+ * Taken at the frame boundary (and after each resimulated tick); written to
+ * GE_NET_HASHLOG and sent as sync checks only once final: the state before
+ * tick k is final when every input up to k-1 is confirmed. */
+static void storeHash(u32 tick)
+{
+    s_HashRing[tick % HASH_RING] = genetStateHash();
+    s_HashRingTick[tick % HASH_RING] = tick + 1;
+}
+
+static void flushHashes(u32 limit)
+{
+    for (long k = s_LastFlushed + 1; k <= (long)limit; k++) {
+        const u32 slot = (u32)k % HASH_RING;
+        if (s_HashRingTick[slot] != (u32)k + 1) {
+            continue;
+        }
+        const u64 h = s_HashRing[slot];
+        if (s_HashLog) {
+            fprintf(s_HashLog, "%ld %016llx\n", k, (unsigned long long)h);
+            if ((k & 63) == 0) fflush(s_HashLog);
+        }
+        if (s_Online && !s_Offline && s_Net && k % SYNC_EVERY == 0) {
+            n64net_sync_record(s_Net, (u32)k, 0, (u32)(h ^ (h >> 32)));
+        }
+        s_LastFlushed = k;
+    }
+}
+
+static void recordHashes(void)
+{
+    const u32 T = s_Tick;
+    u32 limit = T > 0 ? T - 1 : 0;
+    if (T == 0) {
+        storeHash(T);
+        return;
+    }
+    storeHash(T);
+    if (s_Online && !s_Offline && s_Net) {
+        const uint32_t c = n64net_input_confirmed_tick(s_Net);
+        if (c == UINT32_MAX) return;
+        if ((u32)c + 1 < limit) limit = (u32)c + 1;
+    }
+    flushHashes(limit);
+}
+
+/* ---- rollback driver --------------------------------------------------- */
+static void cbSave(void *user, uint32_t slot)
+{
+    (void)user;
+    gesnapSave((int)slot);
+}
+
+static void cbLoad(void *user, uint32_t slot)
+{
+    (void)user;
+    if (!s_LoadWaited) {
+        portRenderWaitIdle();   /* the GPU may still read the memory we restore */
+        s_LoadWaited = 1;
+    }
+    gesnapLoad((int)slot);
+}
+
+static void cbAdvance(void *user)
+{
+    const u32 k = n64net_rollback_callback_tick(s_Net);
+    (void)user;
+    s_Resim = 1;
+    s_ResimTick = k;
+    resimFrame();
+    s_Resim = 0;
+    storeHash(k + 1);
+}
+
+/* every input up to tick-1 confirmed (the ones the current state came from) */
+static void waitConfirmed(u32 tick)
+{
+    while (tick > 0 && !s_Offline) {
+        uint32_t c = n64net_input_confirmed_tick(s_Net);
+        if (c != UINT32_MAX && c + 1 >= tick) break;
+        netPoll();
+        n64net_input_resend(s_Net);
+        if (peerGone()) goOffline();
+        gnt_sleep_us(250);
+    }
+}
+
+static int runRollback(u32 T)
+{
+    n64net_rollback_callbacks cb;
+    int depth;
+    memset(&cb, 0, sizeof(cb));
+    cb.save = cbSave;
+    cb.load = cbLoad;
+    cb.advance = cbAdvance;
+    cb.slot_count = RB_SLOTS;
+    s_LoadWaited = 0;
+    depth = n64net_rollback_frame(s_Net, T, &cb);
+    if (depth > 0) {
+        s_Rollbacks++;
+        s_RollbackTicks += (u32)depth;
+        if ((u32)depth > s_MaxDepth) s_MaxDepth = (u32)depth;
+    } else if (depth < 0) {
+        netLog("rollback needed a state older than the snapshot ring");
+    }
+    return depth;
+}
+
+/* Frame boundary, online: rollback inside a running multiplayer match (from
+ * GE_NET_ROLLBACK_FROM frames after it starts); lockstep everywhere else. */
+static void rollbackPoint(void)
+{
+    const u32 T = s_Tick;
+    int want, closing = 0;
+    if (!s_Online || s_Offline || !s_Rollback || !s_PlaybackOn) return;
+    {
+        static int snapInit = 0;
+        if (!snapInit) {
+            snapInit = 1;
+            if (!gesnapInit(RB_SLOTS)) {
+                netLog("rollback unavailable (snapshots); lockstep");
+                s_Rollback = 0;
+                return;
+            }
+        }
+    }
+    want = g_StageNum != 90 && g_StageNum == s_LastStage && getPlayerCount() >= 2 && g_MainStageNum < 0 &&
+           T >= s_StageStart + s_RollbackFrom;
+    if (!s_WindowOpen && want) {
+        n64net_input_set_window(s_Net, s_RollbackWindow);
+        s_WindowOpen = 1;
+        netLog("rollback on (tick %u)", T);
+    } else if (s_WindowOpen && !want) {
+        waitConfirmed(T);
+        closing = 1;
+    }
+    if (s_WindowOpen) {
+        runRollback(T);
+    }
+    if (closing) {
+        n64net_input_set_window(s_Net, 0);
+        s_WindowOpen = 0;
+        netLog("rollback off (tick %u)", T);
+    }
+}
+
+/* src/boss.c, the stage loop has just ended (g_MainStageNum >= 0). Returns 1
+ * if a rollback undid the stage end (the loop resumes). */
+int genetStageExit(void)
+{
+    const u32 T = s_Tick;
+    if (!s_Online || s_Offline || !s_Rollback || !s_WindowOpen) return 0;
+    waitConfirmed(T);
+    runRollback(T);
+    n64net_input_set_window(s_Net, 0);
+    s_WindowOpen = 0;
+    if (g_MainStageNum < 0) {
+        netLog("rollback: the stage end at tick %u was a misprediction; playing on", T);
+        return 1;
+    }
+    netLog("rollback off (stage end, tick %u)", T);
+    return 0;
+}
+
 /* Called from waitForNextFrame (game thread) in fixed-step mode: waits for
  * the next slot of the schedule and returns the tick count for this frame. */
 s32 genetFrameTicks(void)
 {
     genetInit();
     frameBoundary();
+    rollbackPoint();
+    if (s_PlaybackOn) recordHashes();
 
     if (!s_PlaybackOn) {
         s_PlaybackOn = 1;
@@ -1093,6 +1290,10 @@ s32 genetFrameTicks(void)
     if (s_Online && !s_Offline) {
         netPoll(); /* host: answer save requests; both: keep the ledger moving */
         holdWhileAway();
+    }
+    if (s_WindowOpen && !s_Offline && n64net_timesync_should_skip(s_Net)) {
+        s_NextUs += GENET_TICK_US * (uint64_t)s_Step;   /* ahead of the peer: wait one frame */
+        s_Skips++;
     }
     genetPace();
     return s_Step;
