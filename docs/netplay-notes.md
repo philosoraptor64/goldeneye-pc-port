@@ -218,4 +218,14 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
 - Memory: `gfx_metal_release_all()` (shutdown) releases every Metal object (waits for in-flight frames, restores
   the frame semaphore's count first). Before: ~37 MB/run leaked; now flat (soak 4 cycles ~50 MB; in i64 3 runs
   60 -> 67 -> 60 MB).
-- Not yet: online (genet over i64's game channel), pause, session blob, iOS module build.
+- **iPhone (14 Pro, 2026-11-12): runs inside i64.** iOS module: `cmake -S . -B build-ios-module -G Ninja
+  -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DROMID=ntsc-final -DGE_I64_MODULE=ON
+  -DSDL2_INCLUDE_DIR=<i64>/deps-out/ios/include/SDL2 -DSDL2_LIBRARY=<i64>/deps-out/ios/lib/libSDL2-2.0.0.dylib
+  -DSDL2MAIN_LIBRARY=<any libSDL2main.a (unused)>`; copy `libge007_i64.dylib` to `i64/modules/ios/`, build i64-iOS,
+  install. ROM in i64's Documents (Files > i64). Test: `devicectl ... process launch --environment-variables
+  '{"I64_TEST_GAME":"ge007-us","I64_TEST_GAME_FRAMES":"600","I64_TEST_GAME_RUNS":"2","I64_TEST_GAME_QUIT":"1"}'
+  io.github.philosoraptor.i64`: import from the ROM on the phone, run, stop (threads 16 ms), run again, quit;
+  window reserved at load (0x3_0000_0000), Metal on the A16, audio through i64, footprint 24 -> 30 MB per run.
+  Not yet seen by eye or played with a controller.
+- Not yet: online (genet over i64's game channel), pause (set_paused), session blob.
