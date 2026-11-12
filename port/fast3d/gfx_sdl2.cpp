@@ -62,6 +62,22 @@ static SDL_MetalView metal_view;
 extern "C" void* gfx_sdl_get_metal_layer(void) {
     return metal_view ? SDL_Metal_GetLayer(metal_view) : nullptr;
 }
+/* iOS app switch: SDL delivers these from UIKit while the main thread pumps
+ * events (videoPumpEvents); a watch sees them at once, whatever thread is busy.
+ * The Metal backend draws nothing while inactive, and netplay (genet.c) holds
+ * the game and tells the other player to wait. */
+static int SDLCALL gfx_sdl_app_event_watch(void* userdata, SDL_Event* e) {
+    (void)userdata;
+    if (e->type == SDL_APP_WILLENTERBACKGROUND) {
+        if (!gfx_sdl_app_inactive) sysLogPrintf(LOG_NOTE, "app: to the background");
+        gfx_sdl_app_inactive = true;
+    } else if (e->type == SDL_APP_DIDENTERFOREGROUND) {
+        if (gfx_sdl_app_inactive) sysLogPrintf(LOG_NOTE, "app: back in the foreground");
+        gfx_sdl_app_inactive = false;
+    }
+    return 1;
+}
+
 static void get_drawable_size(SDL_Window* w, int* dw, int* dh) {
     if (gfx_sdl_use_metal) {
         SDL_Metal_GetDrawableSize(w, dw, dh);
@@ -259,6 +275,7 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
     }
 #endif
 
+    SDL_AddEventWatch(gfx_sdl_app_event_watch, NULL);
     bool metal_ok = false;
     if (gfx_sdl_use_metal) {
         Uint32 mflags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_METAL;

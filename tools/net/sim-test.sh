@@ -5,7 +5,9 @@
 # netplay.cfg, Metal, the UIScene app) without signing or a phone.
 # Usage: tools/net/sim-test.sh   (env: FRAMES=2400 MENUS=1 (title -> Multiplayer
 #        by host script) or MP=2,1 (default: start a 2P Temple match at boot);
-#        LATENCY/JITTER/LOSS; SIM=<udid> (default: booted); BIN=build-pc)
+#        LATENCY/JITTER/LOSS; SIM=<udid> (default: booted); BIN=build-pc;
+#        AWAY=<at>:<secs> = after <at> s switch the Simulator to Settings for <secs> s and back:
+#        the Mac must wait (no drop) and the game resume in sync)
 # The simulator app needs the ROM and converted data in its Documents once
 # (copied from ./data by this script).
 set -uo pipefail
@@ -46,6 +48,12 @@ hpid=$!
 sleep 1
 SIMCTL_CHILD_SDL_AUDIODRIVER=dummy xcrun simctl launch --terminate-running-process "$SIM" $BUNDLE > /dev/null
 trap 'kill $hpid 2>/dev/null; xcrun simctl terminate "$SIM" $BUNDLE 2>/dev/null' INT TERM
+if [ -n "${AWAY:-}" ]; then
+    sleep "${AWAY%%:*}"
+    xcrun simctl launch "$SIM" com.apple.Preferences > /dev/null && echo "(Simulator: switched to Settings)"
+    sleep "${AWAY##*:}"
+    xcrun simctl launch "$SIM" $BUNDLE > /dev/null && echo "(Simulator: back to the game)"
+fi
 wait $hpid
 # the guest quits by itself after FRAMES too; give it a moment
 for _ in $(seq 1 20); do

@@ -592,6 +592,20 @@ static n64net_pad toNet(const OSContPad *p)
 static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
 {
     if (s_Offline) {
+        /* inputs the other player sent before leaving are still used, so both
+         * machines play the same frames up to the moment it left */
+        n64net_input_set_local(s_Net, tick, toNet(local));
+        if (n64net_input_ready(s_Net, tick)) {
+            for (int p = 0; p < s_NumPlayers; p++) {
+                n64net_pad n;
+                n64net_input_get(s_Net, p, tick, &n);
+                out[p].button = n.buttons;
+                out[p].stick_x = n.stick_x;
+                out[p].stick_y = n.stick_y;
+                out[p].errno = 0;
+            }
+            return;
+        }
         out[s_Local] = *local;
         return;
     }
@@ -850,6 +864,57 @@ int genetFullViewRect(int *left, int *top, int *width, int *height)
     return 1;
 }
 
+/* iOS app switch (gfx_sdl2.cpp sets the flag): online, the game stops at the
+ * start of a frame and tells the other player we're away; it waits as long as
+ * it takes (n64net: a peer that is away is never dropped), unlike a lost
+ * connection. GE_NET_TEST_AWAY=<tick>:<secs> simulates it (tests). */
+extern bool gfx_sdl_app_inactive;
+static int s_AwaySent = 0;
+
+static int awayNow(void)
+{
+    static long at = -2, secs = 0;
+    static unsigned long long until = 0;
+    if (at == -2) {
+        const char *e = envStr("GE_NET_TEST_AWAY");
+        at = -1;
+        if (e) { at = atoi(e); secs = strchr(e, ':') ? atoi(strchr(e, ':') + 1) : 10; }
+    }
+    if (at >= 0 && (long)s_Tick == at && until == 0) {
+        until = gnt_now_us() + (unsigned long long)secs * 1000000ull;
+    }
+    if (until && gnt_now_us() < until) return 1;
+    return gfx_sdl_app_inactive;
+}
+
+static void holdWhileAway(void)
+{
+    if (!s_Online || s_Offline || !awayNow()) {
+        if (s_AwaySent) {
+            s_AwaySent = 0;
+            for (int i = 0; i < 3; i++) n64net_input_set_away(s_Net, 0);
+            netLog("back: the game goes on");
+            s_NextUs = 0;   /* restart the frame schedule */
+        }
+        return;
+    }
+    s_AwaySent = 1;
+    for (int i = 0; i < 3; i++) n64net_input_set_away(s_Net, 1);
+    netLog("away (app in the background): the game waits");
+    while (awayNow() && !s_PeerLeft) {
+        netPoll();
+        n64net_input_resend(s_Net);
+        gnt_sleep_us(10000);
+    }
+    if (s_PeerLeft) {
+        goOffline();
+    }
+    s_AwaySent = 0;
+    for (int i = 0; i < 3; i++) n64net_input_set_away(s_Net, 0);
+    netLog("back: the game goes on");
+    s_NextUs = 0;
+}
+
 /* Called from waitForNextFrame (game thread) in fixed-step mode: waits for
  * the next slot of the schedule and returns the tick count for this frame. */
 s32 genetFrameTicks(void)
@@ -868,6 +933,7 @@ s32 genetFrameTicks(void)
 
     if (s_Online && !s_Offline) {
         netPoll(); /* host: answer save requests; both: keep the ledger moving */
+        holdWhileAway();
     }
     genetPace();
     return s_Step;

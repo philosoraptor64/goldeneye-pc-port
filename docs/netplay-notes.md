@@ -77,8 +77,12 @@ iOS has no environment: the same lines go into `Documents/netplay.cfg`.
 - Full view: in an online 2-4 player match each machine shows only its own
   player's view, scaled uniformly to the window (gfx_pc.cpp canvas offset +
   scissor clip; the game still draws all views).
-- A silent peer for 20 s or a BYE = play on offline. An app in the background
-  (iOS) is not handled yet (it will look like a lost connection).
+- A silent peer for 20 s or a BYE = play on offline (inputs it already sent are
+  still used). An iPhone switching apps is different: the game holds at a
+  frame boundary and tells the other player it is away (n64net AWAY); the
+  other side waits as long as it takes, then both resume in sync
+  (`GE_NET_TEST_AWAY=<tick>:<secs>` simulates it; sim-test `AWAY=<at>:<secs>`
+  switches the Simulator to Settings and back).
 
 Tests (Mac): `tools/net/pair-test.sh` (two copies; `MENUS=1` = boot, title,
 host walks Multiplayer -> Start by script; `LATENCY/JITTER/LOSS`, `SERVER=local
@@ -98,6 +102,5 @@ host walks Multiplayer -> Start by script; `LATENCY/JITTER/LOSS`, `SERVER=local
   reserved (224 MB: cart, DRAM + mirror, thread stacks). A real iPhone has only
   ~64 GB of address space, so the device build needs a base below that whose
   regions are free; not known yet (needs a run on a phone).
-- Not done: signing/installing on a phone (MacBook), background/foreground
-  handling (AWAY/BACK), touch controls (use a Bluetooth controller), on-device
+- Not done: signing/installing on a phone (MacBook), touch controls (use a Bluetooth controller), on-device
   data conversion.
