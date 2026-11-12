@@ -90,6 +90,43 @@ host walks Multiplayer -> Start by script; `LATENCY/JITTER/LOSS`, `SERVER=local
 `tools/net/sim-test.sh` = the Mac hosts, the booted iOS Simulator joins
 (`MENUS=1`, `FRAMES`). All pass (see the commit messages for numbers).
 
+## Rollback (Apple clang builds: Mac `build-clang`, iOS)
+
+In a running multiplayer match the game predicts the other player's input
+and corrects mispredictions by rewinding and resimulating (n64net
+`n64net_rollback_frame`, window 8 frames, input delay 3); menus, the first
+second of a match and everything after the game-over screen are lockstep.
+GCC builds have no snapshots and stay lockstep (they still play with
+rollback builds). `GE_NET_ROLLBACK=0` forces lockstep.
+
+- Snapshot (`port/src/gesnap.c`): the game's C globals (the `__GESNAP`
+  segment: game files force-include `port/include/gesnap.h`) + the DRAM
+  arena minus the audio thread's music heap + the playback controller
+  buffer = 8.7 MB, saved/loaded in ~0.13 ms; 16 slots.
+- Resimulation (`resimFrame` in genet.c) = src/boss.c's frame body without
+  the GPU task: GE ticks props, AI and auto-aim inside lvlRender, so the
+  display list is built and thrown away. Before restoring memory the game
+  waits until every submitted display list was drawn.
+- Outside the snapshot on purpose: audio (own thread), the scheduler and
+  message queues, controller polling (joy.c), screen shake (retrace
+  thread), performance graphs, the wall-clock copies, gfx task settings.
+  Sounds started in resimulated frames do play (they are not suppressed:
+  sound handles are part of game logic).
+- A stage end produced by a predicted frame is settled in a boss.c hook
+  before the stage unloads (genetStageExit); normally the window is already
+  closed by then (the game-over screen locks the controls).
+- `GE_SYNCTEST=N` (offline): rewind N frames every frame and compare the
+  whole snapshot byte for byte; `GE_SYNCTEST_CONTINUE=1` plays on from the
+  resimulated state, `GE_SYNCTEST_DUMP=<file>` lists every differing range
+  of the first mismatch (symbolize with `atos -o <binary> -l <image base>`),
+  `GE_NET_HASHDETAIL=<tick>` prints the hash parts. Result: 2P and 4P,
+  rewinding 8 frames every frame for 3600 frames, 0 differing bytes.
+- Results (pair tests, simulated 40-50 ms + 20-30 ms jitter + 3-5% loss):
+  in sync; ~200 rollbacks per side per 30 s (max depth 6-9); stalls ~0.2-1
+  s per minute at delay 3, where lockstep needs delay 6 for the same stalls;
+  Mac vs iOS Simulator in sync, also across a 15 s app switch.
+  `GE_NET_TEST_MPTIME=<s>` shortens matches (match-end tests).
+
 ## iOS
 
 - `GE_IOS` (CMake) selects the iOS code. Do not test `PLATFORM_IOS`:
