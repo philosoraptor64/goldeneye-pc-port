@@ -21,6 +21,7 @@
 #include <PR/ultratypes.h>
 #include <PR/os.h>
 
+#include "genet.h"
 #include "platform.h"
 #include "system.h"
 #include "portaddr.h"
@@ -87,6 +88,7 @@ static void portAtExit(void)
      * abort(), which does not run atexit handlers. */
     inputRumbleStopAll();   /* D493: no pad left rumbling after exit */
     videoSaveWindowState();
+    genetShutdown(); /* netplay: tell the other player we left */
     configSave();
     /* D632: release the GPU context while the process is alive (needs the
      * window state saved first; before any relaunch so the GPU init of the
@@ -198,6 +200,10 @@ int main(int argc, char **argv)
      *     (fileGetIsCheatUnlocked, fileIsStageUnlockedAtDifficulty); the
      *     save is never patched. */
     portAllUnlockedApply();
+
+    /* Netplay (port/src/genet.c): connect before the game picks its random
+     * seed and reads the save, so both machines start from the same state. */
+    genetConnect();
 
     /* 2. Load the ROM and map segments. */
     if (romdataInit() != 0) {

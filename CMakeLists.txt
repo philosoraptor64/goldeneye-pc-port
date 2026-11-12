@@ -808,6 +808,19 @@ set(SRC
 set(BIN_NAME "ge007${BIN_REGION}.${TARGET_ARCH}")
 add_executable(ge007 ${SRC})
 target_link_libraries(ge007 ${LIBS})
+
+# Netplay (port/src/genet.c): n64net's input ledger + rendezvous, and a build
+# fingerprint refreshed at every build (cmake/NetBuildId.cmake) so only
+# identical builds connect.
+add_subdirectory(cmake/n64net "${CMAKE_BINARY_DIR}/n64net")
+target_link_libraries(ge007 n64net)
+add_custom_target(ge_net_build_id ALL
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/generated/genet_build_id.h
+          -P ${CMAKE_SOURCE_DIR}/cmake/NetBuildId.cmake
+  BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/genet_build_id.h
+  COMMENT "Netplay build fingerprint")
+add_dependencies(ge007 ge_net_build_id)
+target_include_directories(ge007 PRIVATE ${CMAKE_BINARY_DIR}/generated)
 set_target_properties(ge007 PROPERTIES OUTPUT_NAME "${BIN_NAME}")
 if(WIN32)
   set_target_properties(ge007 PROPERTIES WIN32_EXECUTABLE TRUE)

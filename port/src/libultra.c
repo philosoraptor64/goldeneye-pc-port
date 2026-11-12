@@ -1189,8 +1189,27 @@ static void geEepromLoad(void)
     }
 }
 
+/* Netplay (port/src/genet.c): the guest plays on the host's save, kept in
+ * memory only (its own ge007.eep is never touched during the session). */
+static int s_eepromNoStore = 0;
+
+void portEepromCopy(u8 *out)
+{
+    geEepromLoad();
+    memcpy(out, s_eeprom, GE_EEP_SIZE);
+}
+
+void portEepromAdopt(const u8 *in)
+{
+    memcpy(s_eeprom, in, GE_EEP_SIZE);
+    s_eepromLoaded = 1;
+    s_eepromNoStore = 1;
+    sysLogPrintf(LOG_INFO, "eeprom: using the netplay host's save (not written to disk)");
+}
+
 static void geEepromStore(void)
 {
+    if (s_eepromNoStore) return;
     const char *path = sysResolvePath(GE_EEP_PATH);
     FILE *fp = fopen(path, "wb");
     if (fp) {

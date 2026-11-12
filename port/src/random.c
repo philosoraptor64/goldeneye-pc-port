@@ -132,6 +132,16 @@ void randomSetSeed(u32 seed)
      * This pins it for determinism tests (E1) and N64 parity tests (E-B). */
     {
         const char *e = getenv("GE_RSEED");
+        extern int genetSessionSeed(u64 *out);
+        u64 netseed;
+
+        /* netplay: every machine starts from the session's seed (genet.c) */
+        if (genetSessionSeed(&netseed))
+        {
+            g_randomSeed = netseed;
+            osSyncPrintf("genet: boot seed %016llx\n", (unsigned long long)g_randomSeed);
+            return;
+        }
 
         if (e && e[0])
         {

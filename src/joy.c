@@ -857,3 +857,12 @@ s32 joyGetContDataIndex(void)
 {
     return (g_ContDataPtr - g_ContData);
 }
+
+#ifdef PORT
+/* Netplay (port/src/genet.c): this machine's newest polled pad, read on the
+ * game thread when the frame's input is sampled. */
+void joyPortLatestPad(s32 channel, OSContPad *out)
+{
+    *out = g_ContData[CONTDATA_REGULAR].samples[g_ContData[CONTDATA_REGULAR].nextlast].pads[channel];
+}
+#endif

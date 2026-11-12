@@ -1,0 +1,3 @@
+[submodule "external/n64net"]
+	path = external/n64net
+	url = https://github.com/philosoraptor64/n64net.git
