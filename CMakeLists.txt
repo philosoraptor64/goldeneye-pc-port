@@ -718,6 +718,7 @@ if(APPLE)
     OUTPUT "${SRC_DRAM_SYMS_EXPANDED}"
     COMMAND "${CMAKE_C_COMPILER}" "-E"
             "-I${CMAKE_SOURCE_DIR}/port/include"
+            "-DPORT_ADDR_BASE=${PORT_ADDR_BASE}"
             ${_dram_syms_pp_def}
             "${SRC_DRAM_SYMS_INPUT}"
             "-o" "${SRC_DRAM_SYMS_EXPANDED}"

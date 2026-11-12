@@ -162,6 +162,14 @@ tools/vmprobe-iphone14pro.txt):
   build-ios/ge007.aarch64.app. Not installed: the 14 Pro is at the free-profile limit of 3 apps (i64, Perfect Dark,
   Starship); the user must pick one to remove. Then: stub profile for its bundle id, codesign, devicectl install, copy
   the ROM + pcmodels-ntsc-final/ + pccg-ntsc-final/ (Mac converters) into Documents.
+- **Boots on the iPhone 14 Pro (2026-11-12, MacBook).** Fix needed: CMake preprocessed `dram_syms.S` without
+  `-DPORT_ADDR_BASE`, so portaddr.h fell back to the macOS 16 TiB base and portAddrInit aborted with
+  "dram_syms base mismatch (cfb_16=0x100070000000, expected 0x370000000)". Now passed explicitly.
+  Result: the four regions reserve at 0x3_0000_0000 (224 MB), the game renders and ran 30 s / 1500+ frames
+  with no crash (no screen check yet: the user was away). Signed like PD's M7b (stub app `io.github.philosoraptor.goldeneye`,
+  existing cert); data copied to Documents: ge007.ntsc-final.z64, pcmodels-ntsc-final/, pccg-ntsc-final/.
+  Log: Documents/ge007.log. Standalone PD and Starship were removed from the 14 Pro by the user's choice
+  (validated; later phone testing goes through i64 modules).
 Caveats: the probe ran inside PD after PD's own allocations (16 MB heap + 32 MB ROM), so GoldenEye's heap may sit
 differently: reserve the window first thing in main (port_addr.c) and log vm_region on failure. Re-probe on the Duo
 (iPhone19,4, more RAM) when it's back. Next: G1 device build with this base, sign (stub profile, existing cert),
