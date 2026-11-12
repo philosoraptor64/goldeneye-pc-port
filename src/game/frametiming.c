@@ -4,6 +4,7 @@
 #ifdef PORT
 #include <stdlib.h>
 #include <stdio.h>
+#include "genet.h"
 /* Max frames of simulation catch-up per rendered frame (D155). 6 ~= 100 ms
  * at 60 Hz: covers a legitimately slow frame without letting a multi-second
  * stall spiral the anim/sim loops. */
@@ -98,7 +99,17 @@ void updateFrameCounters(s32 deltaFrames)
 void waitForNextFrame(void) //maybe WaitForTick
 {
   u32 nextFrameTime; //next frame time?
-  
+
+#ifdef PORT
+  /* Netplay / replay: fixed ticks per frame on an absolute schedule
+   * (port/src/genet.c), so every machine runs the same simulation. */
+  if (genetFixedStep()) {
+    frameDelay = 1;
+    updateFrameCounters(genetFrameTicks());
+    return;
+  }
+#endif
+
   do {
     #ifdef REFRESH_PAL
     nextFrameTime = ((osGetCount() - copy_of_osgetcount_value_1) + 465525) / 931050; 
