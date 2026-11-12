@@ -604,6 +604,21 @@ void select_ramrom_to_play(void)
     s32 i;
     s32 temp_v0;
 
+#ifdef PORT
+    /* Netplay (port/src/genet.c): no attract demo in fixed-step / online
+     * play. A demo replaces the input seam with its own playback, and
+     * skipping it reads each machine's local controller, so one machine
+     * could leave the demo while the other plays on. Go to the menus, as
+     * if Start had been pressed. */
+    {
+        extern int genetFixedStep(void);
+        if (genetFixedStep())
+        {
+            frontChangeMenu(MENU_FILE_SELECT, TRUE);
+            return;
+        }
+    }
+#endif
     temp_v0 = fileGetHighestStageUnlockedAnyFolder();
 
     for (i = 0; ramrom_table[i].fdata != NULL && temp_v0 >= ramrom_table[i].locked; i++)

@@ -8,6 +8,8 @@
 #        LATENCY/JITTER (ms) LOSS (%) on both sides; SERVER=local [ROOM=GETS RELAY=1] (local room server);
 #        DESYNC_TEST=<tick> (inject a desync on the guest: the run must report it);
 #        GUEST_LATE=<secs> (start the guest later); KILL_GUEST=<secs> (kill it: the host must play on);
+#        HOST_ENV/GUEST_ENV="VAR=value ..." (extra settings for one side, e.g. HOST_ENV="GE_NET_SCRIPT=...");
+#        MENUS=1: no shortcut -- the host walks title -> Multiplayer -> Start by script, bots from tick 800;
 #        GUEST_SET="Video.FovScale=150 Window.Width=800" (the guest runs from its own folder with these
 #        settings changed in a copy of data/ge007.ini: online play must not depend on local settings)
 set -uo pipefail
@@ -21,6 +23,12 @@ out=build-pc/net-test/$(date +%Y%m%d-%H%M%S); mkdir -p "$out"
 
 common=(GE_NET_BOT=1 GE_NET_FRAMES=$FRAMES GE_NET_DELAY=${DELAY:-2}
         GE_NET_SIM_LATENCY=${LATENCY:-0} GE_NET_SIM_JITTER=${JITTER:-0} GE_NET_SIM_LOSS=${LOSS:-0})
+if [ "${MENUS:-0}" = 1 ]; then
+    MP=
+    sc=""; for t in $(seq 60 60 540); do sc="$sc$t:START;"; done
+    HOST_ENV="${HOST_ENV:-} GE_NET_SCRIPT=${sc}580:SDOWN;586:SNONE;600:A;700:START"
+    common+=(GE_NET_BOT_FROM=800 GE_NET_MENULOG=1)
+fi
 [ -n "$MP" ] && common+=(GE_STARTMP=$MP GE_MPVIRT=1)
 
 spid=
@@ -58,10 +66,10 @@ PY
     echo "guest settings: $GUEST_SET"
 fi
 
-env "${common[@]}" "${hostnet[@]}" GE_NET_HASHLOG="$out/host.hash" "$bin" > "$out/host.log" 2>&1 &
+env "${common[@]}" "${hostnet[@]}" ${HOST_ENV:-} GE_NET_HASHLOG="$out/host.hash" "$bin" > "$out/host.log" 2>&1 &
 hpid=$!
 sleep "${GUEST_LATE:-1}"
-(cd "$guestdir" && env "${common[@]}" "${guestnet[@]}" GE_NET_HASHLOG="$OLDPWD/$out/guest.hash" \
+(cd "$guestdir" && env "${common[@]}" "${guestnet[@]}" ${GUEST_ENV:-} GE_NET_HASHLOG="$OLDPWD/$out/guest.hash" \
     ${DESYNC_TEST:+GE_NET_TEST_DESYNC=$DESYNC_TEST} "$OLDPWD/$bin" > "$OLDPWD/$out/guest.log" 2>&1) &
 gpid=$!
 trap 'kill $hpid $gpid $spid 2>/dev/null' INT TERM

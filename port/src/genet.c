@@ -40,6 +40,7 @@
 #include "joy.h"
 #include "player.h"
 #include "bondview.h"
+#include "portaddr.h"
 #include "n64net_input.h"
 #include "genet_transport.h"
 #include "genet_build_id.h"
@@ -49,6 +50,8 @@ extern u64 g_chrObjRandomSeed;
 extern s32 g_GlobalTimer;
 extern s32 currentFrameCounter;
 extern s32 g_StageNum;
+extern s32 current_menu, menu_update;   /* src/game/front.c (MENU enums, 32-bit) */
+extern s32 selected_stage, MP_stage_selected;
 
 typedef struct ChrRecord ChrRecord;
 extern ChrRecord *g_ChrSlots;
@@ -80,6 +83,7 @@ static int s_Init = 0;
 static int s_Determ = 0;
 static s32 s_Step = 1;
 static u32 s_BotMask = 0;
+static long s_BotFrom = 0;    /* GE_NET_BOT_FROM: the bot starts at this tick */
 static long s_QuitFrames = 0;
 static FILE *s_HashLog = NULL;
 
@@ -154,6 +158,9 @@ static void genetInit(void)
     e = getenv("GE_NET_BOT");
     if (e && *e) s_BotMask = (u32)strtol(e, NULL, 0) & 0xf;
 
+    e = getenv("GE_NET_BOT_FROM");
+    if (e && *e) s_BotFrom = atoi(e);
+
     e = getenv("GE_NET_FRAMES");
     if (e && *e) s_QuitFrames = atoi(e);
 
@@ -212,22 +219,31 @@ static u64 genetStateHash(void)
     HASHV(g_GlobalTimer);
     HASHV(currentFrameCounter);
     HASHV(g_StageNum);
+    HASHV(current_menu);
+    HASHV(menu_update);
+    HASHV(selected_stage);
+    HASHV(MP_stage_selected);
 
-    for (int i = 0; i < 4; i++) {
-        struct player *pl = g_playerPointers[i];
-        if (!pl) continue;
-        HASHV(pl->pos);
-        HASHV(pl->bondhealth);
-        HASHV(pl->bondarmour);
-        HASHV(pl->vv_theta);
-        HASHV(pl->vv_verta);
-        if (pl->prop) HASHV(pl->prop->pos);
+    /* only the stage's players: the other pointers can be stale across a
+     * stage change; no pointer chasing through props for the same reason */
+    {
+        s32 np = getPlayerCount();
+        HASHV(np);
+        for (int i = 0; i < np && i < 4; i++) {
+            struct player *pl = g_playerPointers[i];
+            if (!pl || !portAddrIsMapped(pl)) continue;
+            HASHV(pl->pos);
+            HASHV(pl->bondhealth);
+            HASHV(pl->bondarmour);
+            HASHV(pl->vv_theta);
+            HASHV(pl->vv_verta);
+        }
     }
 
-    if (g_ChrSlots) {
+    if (g_ChrSlots && portAddrIsMapped(g_ChrSlots)) {
         for (s32 i = 0; i < g_NumChrSlots; i++) {
             struct ChrRecord *c = &g_ChrSlots[i];
-            if (c->chrnum < 0 || !c->prop) continue;
+            if (c->chrnum < 0 || !c->prop || !portAddrIsMapped(c->prop)) continue;
             HASHV(c->chrnum);
             u8 at = (u8)c->actiontype;
             HASHV(at);
@@ -603,6 +619,94 @@ static void endTick(u32 tick, u64 hash)
     }
 }
 
+/* Frame-timed test script for the local pad (GE_NET_SCRIPT="tick:TOK[,TOK...];...").
+ * Buttons (A B Z START L R UP DOWN LEFT RIGHT CU CD CL CR) are pressed for 3
+ * ticks; stick tokens (SUP SDOWN SLEFT SRIGHT, SNONE = centre) last until
+ * changed. In fixed-step play the simulation is frame-exact, so a script
+ * reaches the same menu item on every run. */
+#define SCRIPT_MAX 96
+static struct { u32 tick; u16 buttons; s8 sx, sy; int stick; } s_Script[SCRIPT_MAX];
+static int s_ScriptLen = -1;
+static s8 s_ScriptSX = 0, s_ScriptSY = 0;
+
+static void scriptParse(void)
+{
+    const char *e = envStr("GE_NET_SCRIPT");
+    s_ScriptLen = 0;
+    if (!e) return;
+    while (*e && s_ScriptLen < SCRIPT_MAX) {
+        char tok[16];
+        int n = 0;
+        s_Script[s_ScriptLen].tick = (u32)strtol(e, (char **)&e, 10);
+        s_Script[s_ScriptLen].buttons = 0;
+        s_Script[s_ScriptLen].stick = 0;
+        if (*e == ':') e++;
+        for (;;) {
+            n = 0;
+            while (*e && *e != ',' && *e != ';' && n < 15) tok[n++] = *e++;
+            tok[n] = 0;
+            {
+                static const struct { const char *name; u16 bit; } kBtn[] = {
+                    {"A", A_BUTTON}, {"B", B_BUTTON}, {"Z", Z_TRIG}, {"START", START_BUTTON},
+                    {"L", L_TRIG}, {"R", R_TRIG}, {"UP", U_JPAD}, {"DOWN", D_JPAD},
+                    {"LEFT", L_JPAD}, {"RIGHT", R_JPAD}, {"CU", U_CBUTTONS}, {"CD", D_CBUTTONS},
+                    {"CL", L_CBUTTONS}, {"CR", R_CBUTTONS},
+                };
+                int found = 0;
+                for (size_t k = 0; k < sizeof(kBtn) / sizeof(kBtn[0]); k++) {
+                    if (strcmp(tok, kBtn[k].name) == 0) { s_Script[s_ScriptLen].buttons |= kBtn[k].bit; found = 1; }
+                }
+                if (!found) {
+                    s8 sx = 0, sy = 0; int st = 1;
+                    if (strcmp(tok, "SUP") == 0) sy = 80;
+                    else if (strcmp(tok, "SDOWN") == 0) sy = -80;
+                    else if (strcmp(tok, "SLEFT") == 0) sx = -80;
+                    else if (strcmp(tok, "SRIGHT") == 0) sx = 80;
+                    else if (strcmp(tok, "SNONE") == 0) { }
+                    else { st = 0; if (tok[0]) netLog("GE_NET_SCRIPT: unknown token %s", tok); }
+                    if (st) { s_Script[s_ScriptLen].stick = 1; s_Script[s_ScriptLen].sx = sx; s_Script[s_ScriptLen].sy = sy; }
+                }
+            }
+            if (*e == ',') { e++; continue; }
+            break;
+        }
+        s_ScriptLen++;
+        if (*e == ';') e++;
+    }
+    netLog("script: %d entries", s_ScriptLen);
+}
+
+/* Returns 1 when the script drives the pad at this tick (until its last entry + 60 ticks). */
+static int scriptPad(u32 tick, OSContPad *out)
+{
+    if (s_ScriptLen < 0) scriptParse();
+    if (s_ScriptLen == 0) return 0;
+    if (tick > s_Script[s_ScriptLen - 1].tick + 60) return 0;
+    out->button = 0;
+    for (int i = 0; i < s_ScriptLen; i++) {
+        if (s_Script[i].tick == tick && s_Script[i].stick) { s_ScriptSX = s_Script[i].sx; s_ScriptSY = s_Script[i].sy; }
+        if (tick >= s_Script[i].tick && tick < s_Script[i].tick + 3) out->button |= s_Script[i].buttons;
+    }
+    out->stick_x = s_ScriptSX;
+    out->stick_y = s_ScriptSY;
+    out->errno = 0;
+    return 1;
+}
+
+/* GE_NET_MENULOG=1: log menu changes with their tick (writing scripts) */
+static void menuLog(u32 tick)
+{
+    static int on = -1;
+    static s32 last = -12345, lastStage = -12345;
+    if (on < 0) on = envStr("GE_NET_MENULOG") != NULL;
+    if (!on) return;
+    if (current_menu != last || g_StageNum != lastStage) {
+        netLog("tick %u: menu %d, stage %d", tick, (int)current_menu, (int)g_StageNum);
+        last = current_menu;
+        lastStage = g_StageNum;
+    }
+}
+
 static s32 genetPlayback(struct contsample *samples, s32 curlast)
 {
     const u32 tick = s_Tick;
@@ -614,6 +718,7 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
         netLog("test desync injected at tick %u", tick);
     }
 
+    menuLog(tick);
     h = genetStateHash();
     if (s_HashLog) {
         fprintf(s_HashLog, "%u %016llx\n", tick, (unsigned long long)h);
@@ -624,8 +729,12 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     if (s_Online) {
         OSContPad local;
         memset(&local, 0, sizeof(local));
-        if (s_BotMask) {
+        if (scriptPad(tick, &local)) {
+            /* scripted menus */
+        } else if (s_BotMask && (long)tick >= s_BotFrom) {
             botPad(tick, s_Local, &local);
+        } else if (s_BotMask) {
+            /* bot not started yet: idle */
         } else {
             joyPortLatestPad(0, &local); /* this machine's own controller is always its controller 1 */
         }
@@ -633,7 +742,9 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
         endTick(tick, h);
     } else {
         for (int p = 0; p < MAXCONTROLLERS; p++) {
-            if (s_BotMask & (1u << p)) botPad(tick, p, &pads[p]);
+            if (p == 0 && scriptPad(tick, &pads[0])) continue;
+            if ((s_BotMask & (1u << p)) && (long)tick >= s_BotFrom) botPad(tick, p, &pads[p]);
+            else if (!(s_BotMask & (1u << p))) joyPortLatestPad(p, &pads[p]);
         }
     }
 
@@ -667,7 +778,10 @@ s32 genetFrameTicks(void)
     if (!s_PlaybackOn) {
         s_PlaybackOn = 1;
         /* online: the game sees exactly the session's controllers */
-        joySetPlaybackFunc(genetPlayback, s_Online ? s_NumPlayers : MAXCONTROLLERS);
+        int ctl = s_Online ? s_NumPlayers : MAXCONTROLLERS;
+        const char *ce = envStr("GE_NET_CONTROLLERS");   /* test aid: the controller count offline */
+        if (!s_Online && ce) ctl = atoi(ce);
+        joySetPlaybackFunc(genetPlayback, ctl);
         joySetContDataIndex(1);
     }
 
