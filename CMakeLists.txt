@@ -226,10 +226,22 @@ configure_file(
 # bin/../include) and generate an absolute-path include.
 get_filename_component(_PORT_GCC_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
 if(APPLE)
-  execute_process(
-    COMMAND xcrun --show-sdk-path
-    OUTPUT_VARIABLE _PORT_MACOS_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
+  # The SDK being built against (an iOS build passes its own sysroot), else
+  # the default macOS SDK.
+  if(CMAKE_OSX_SYSROOT AND IS_ABSOLUTE "${CMAKE_OSX_SYSROOT}" AND EXISTS "${CMAKE_OSX_SYSROOT}/usr/include/string.h")
+    set(_PORT_MACOS_SDK "${CMAKE_OSX_SYSROOT}")
+  elseif(CMAKE_OSX_SYSROOT)
+    execute_process(
+      COMMAND xcrun --sdk ${CMAKE_OSX_SYSROOT} --show-sdk-path
+      OUTPUT_VARIABLE _PORT_MACOS_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+  endif()
+  if(NOT _PORT_MACOS_SDK)
+    execute_process(
+      COMMAND xcrun --show-sdk-path
+      OUTPUT_VARIABLE _PORT_MACOS_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+  endif()
   if(NOT _PORT_MACOS_SDK)
     message(FATAL_ERROR "Cannot locate the macOS SDK; install the Xcode Command Line Tools")
   endif()
@@ -285,6 +297,34 @@ configure_file(
   "${CMAKE_SOURCE_DIR}/port/include/hoststddef.h.in"
   "${CMAKE_BINARY_DIR}/port/include/hoststddef.h" @ONLY)
 
+# libc++ (Apple clang) wraps the C headers in <SDK>/usr/include/c++/v1, and its
+# <cmath>/<cstring>/<cstdlib>/<cstddef> include the C header and then require
+# the wrapper's _LIBCPP_*_H guard. The decomp's include/ stubs sit ahead of the
+# system path, so the generated host*.h shims also pull the wrappers in by
+# absolute path for C++ TUs (danturn's macos-arm64 branch, findings D295).
+# libstdc++ (GCC) has no such wrappers.
+set(PORT_HAVE_LIBCPP 0)
+foreach(_h MATH STRING STDLIB STDDEF)
+  set(PORT_LIBCPP_${_h}_H "")
+endforeach()
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND EXISTS "${_PORT_MACOS_SDK}/usr/include/c++/v1/math.h")
+  set(PORT_HAVE_LIBCPP 1)
+  set(PORT_LIBCPP_MATH_H   "${_PORT_MACOS_SDK}/usr/include/c++/v1/math.h")
+  set(PORT_LIBCPP_STRING_H "${_PORT_MACOS_SDK}/usr/include/c++/v1/string.h")
+  set(PORT_LIBCPP_STDLIB_H "${_PORT_MACOS_SDK}/usr/include/c++/v1/stdlib.h")
+  set(PORT_LIBCPP_STDDEF_H "${_PORT_MACOS_SDK}/usr/include/c++/v1/stddef.h")
+endif()
+if(APPLE)
+  set(PORT_HOST_MATH_H "${_PORT_MACOS_SDK}/usr/include/math.h")
+else()
+  get_filename_component(PORT_HOST_MATH_H "${_PORT_GCC_DIR}/../include/math.h" ABSOLUTE)
+endif()
+foreach(_h string stdlib stddef math)
+  configure_file(
+    "${CMAKE_SOURCE_DIR}/port/include/host${_h}.h.in"
+    "${CMAKE_BINARY_DIR}/port/include/host${_h}.h" @ONLY)
+endforeach()
+
 # ----------------------------------------------------------------------------
 # Compiler definitions & flags
 # ----------------------------------------------------------------------------
@@ -306,6 +346,12 @@ endif()
 
 # The decomp is big-endian N64 code with unaligned accesses; these flags are
 # required to compile it cleanly on a little-endian host (same as the PD port).
+# Netplay determinism: no fused multiply-add. GCC fuses by default
+# (-ffp-contract=fast) and clang within expressions; machines that build with
+# different compilers or for different CPUs (Mac, iPhone, x86) must round the
+# same way, so the simulation runs bit-identically everywhere.
+add_compile_options(-ffp-contract=off)
+
 add_compile_options(
   -fno-strict-aliasing
   -funsigned-char
@@ -386,6 +432,23 @@ if(NOT MINGW)
     # downgrades them to warnings — the C counterpart of the -Wno-error lines
     # above, and the documented path for building older C against GCC 14+.
     add_compile_options($<$<COMPILE_LANGUAGE:C>:-fpermissive>)
+  elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # Clang (needed for the iOS build and the Metal renderer): -fms-extensions
+    # gives the anonymous tagged base member of the `inherits` idiom (field
+    # access); the base-pointer conversion GCC's Plan 9 mode adds is only a
+    # warning here, and the base is the first member, so the address is the
+    # same. Clang's newer hard errors for the decomp's IDO-era leniencies go
+    # back to warnings, like GCC's -fpermissive.
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:C>:-fms-extensions>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-microsoft-anon-tag>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-function-pointer-types>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-int>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=return-type>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=int-conversion>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>
+      $<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>)
+    add_compile_definitions(_FORTIFY_SOURCE=0)
   endif()
 endif()
 

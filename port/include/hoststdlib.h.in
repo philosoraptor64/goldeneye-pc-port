@@ -5,4 +5,9 @@
  * can bypass the N64 include/stdlib.h (whose lldiv_t/ldiv_t typedefs clash
  * with the host's in C++ TUs). See docs/internals.md §11. */
 #include "@PORT_HOST_STDLIB_H@"
+#if @PORT_HAVE_LIBCPP@ && defined(__cplusplus)
+/* libc++'s own <stdlib.h> wrapper; <cstdlib> requires its _LIBCPP_STDLIB_H
+ * guard. After the C header (see hoststring.h.in / findings D295). */
+#include "@PORT_LIBCPP_STDLIB_H@"
+#endif
 #endif

@@ -6,4 +6,12 @@
  * `const unsigned char *` and conflicts with the host declarations that SDL
  * and other system headers pull in). See docs/internals.md §11 D12. */
 #include "@PORT_HOST_STRING_H@"
+#if @PORT_HAVE_LIBCPP@ && defined(__cplusplus)
+/* libc++'s own <string.h> wrapper. <cstring> includes <string.h> and then
+ * requires libc++'s _LIBCPP_STRING_H guard, which only that wrapper defines.
+ * It must come AFTER the C header: pulled in by absolute path, the wrapper's
+ * #include_next <string.h> does not find the C header, so we supply it first.
+ * See docs/dev/findings.md D295 and CMakeLists' libc++ block. */
+#include "@PORT_LIBCPP_STRING_H@"
+#endif
 #endif

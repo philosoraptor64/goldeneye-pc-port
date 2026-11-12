@@ -152,6 +152,8 @@ float portCrosshairScale(void) { return cfgCrosshairSize / 100.0f; }
  * The call site points at display_image_at_position's env-color command;
  * its immediately following command is the combine mode. Original/0
  * skips this rewrite, keeping the original game's DL byte-identical. */
+void portCrosshairTint(s32 *r, s32 *g, s32 *b);   /* below; used before its definition */
+
 void portCrosshairApplyTintCombine(Gfx *envCommand)
 {
     if (!envCommand) return;

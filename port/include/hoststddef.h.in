@@ -5,4 +5,9 @@
  * can bypass the N64 include/stddef.h (an empty stub whose guard otherwise
  * prevents the host header's max_align_t/size_t from reaching C++ TUs). */
 #include "@PORT_HOST_STDDDEF_H@"
+#if @PORT_HAVE_LIBCPP@ && defined(__cplusplus)
+/* libc++'s own <stddef.h> wrapper; <cstddef> requires its _LIBCPP_STDDEF_H
+ * guard. After the compiler's real stddef.h (see hoststring.h.in / D295). */
+#include "@PORT_LIBCPP_STDDEF_H@"
+#endif
 #endif
