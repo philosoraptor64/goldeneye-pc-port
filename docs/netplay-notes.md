@@ -24,8 +24,13 @@ Game data (once, Mac): ROM -> `data/ge007.ntsc-final.z64`, then
 `python3 tools_pc/d43_emit.py ntsc-final && python3 tools_pc/d69_emit.py ntsc-final && python3 tools_pc/d88_emit.py ntsc-final --regen`.
 On iOS the same files go into the app's Documents folder (`$S` = Documents):
 the ROM, `pcmodels-ntsc-final/`, `pccg-ntsc-final/` (the sim test copies them).
-TODO: convert on the device (the Python converters would need a C port; upstream
-spawns a bundled Python binary, impossible on iOS).
+**Native converter (G3, 2026-11-12):** `port/convert/ge_convert.c` is a C port of
+d43/d69/d88(+propdefs), byte-identical output (`tools_pc/check_native_convert.sh`),
+0.3 s on the Mac. The file tables come from the repo at build time
+(`tools_pc/gen_convert_tables.py` -> build/port/convert/ge_convert_tables.h, one region
+per build). The game runs it on first boot when the sidecars are missing (romconvert.c,
+before the bundled Python converter; the only path on iOS), so on the phone only the ROM
+needs to go into Documents. Tested: 14 Pro clean install + ROM only -> converted, boots.
 
 ## Determinism (port/src/genet.c)
 

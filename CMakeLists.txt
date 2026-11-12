@@ -221,6 +221,11 @@ else()
   message(FATAL_ERROR "Unknown ROMID: ${ROMID}")
 endif()
 
+# G3: native ROM sidecar converter (port/convert, C port of tools_pc/d43/d69/
+# d88). Added here, before the game's global include paths and compile options
+# (they shadow <stdio.h>/<zlib.h> and force-include versioninfo.h).
+add_subdirectory(port/convert)
+
 # git hash for version info
 execute_process(COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -971,6 +976,7 @@ if(GE_IOS)
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${GE_IOS_BUNDLE_ID}")
 endif()
 target_link_libraries(ge007 n64net)
+target_link_libraries(ge007 ge007_convert)
 add_custom_target(ge_net_build_id ALL
   COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/generated/genet_build_id.h
           -P ${CMAKE_SOURCE_DIR}/cmake/NetBuildId.cmake

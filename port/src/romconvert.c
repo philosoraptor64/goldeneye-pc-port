@@ -178,7 +178,41 @@ static int rcRunConverter(const char *exePath, const char *rom, const char *out)
 }
 #endif
 
-int romConvertEnsureSidecars(const unsigned char *romImg, const char *romRelPath)
+/* G3: the native converter (port/convert/ge_convert.c, a C port of the
+ * Python tools with byte-identical output). Declared here rather than via its
+ * header: this TU sees the decomp's <stdint.h>/<stddef.h> stubs. */
+extern int ge_convert_sidecars(const unsigned char *rom, unsigned long romSize, const char *outRoot,
+                               void (*progress)(float done, void *user), void *user,
+                               char *err, unsigned long errSize);
+extern const char *ge_convert_region(void);
+
+/* Runs the native converter into $S. Returns 1 on success, 0 if it doesn't
+ * cover this region, -1 on failure. */
+static int rcRunNative(const unsigned char *romImg, unsigned long romSize, const char *region)
+{
+    if (strcmp(ge_convert_region(), region) != 0)
+        return 0;
+    /* $S root: resolve a child path and drop the last component */
+    char root[1024];
+    snprintf(root, sizeof(root), "%s", sysResolvePath("$S/x"));
+    size_t n = strlen(root);
+    while (n && root[n - 1] != '/' && root[n - 1] != '\\')
+        n--;
+    if (n)
+        n--;
+    root[n] = 0;
+    if (!root[0])
+        snprintf(root, sizeof(root), ".");
+    char err[512] = "";
+    sysLogPrintf(LOG_INFO, "romconvert: converting the ROM for '%s' into %s (native, one-time)", region, root);
+    if (ge_convert_sidecars(romImg, romSize, root, NULL, NULL, err, sizeof(err)) != 0) {
+        sysLogPrintf(LOG_ERROR, "romconvert: native conversion failed: %s", err);
+        return -1;
+    }
+    return 1;
+}
+
+int romConvertEnsureSidecars(const unsigned char *romImg, unsigned long romSize, const char *romRelPath)
 {
     const char *region = rcRegionForCountry(romImg[0x3E]);
     if (!region)
@@ -186,6 +220,19 @@ int romConvertEnsureSidecars(const unsigned char *romImg, const char *romRelPath
 
     if (rcSidecarsPresent(region))
         return 1;
+
+    {
+        int nat = rcRunNative(romImg, romSize, region);
+        if (nat > 0 && rcSidecarsPresent(region)) {
+            sysLogPrintf(LOG_INFO, "romconvert: sidecars generated — continuing boot");
+            return 1;
+        }
+#if defined(GE_IOS)
+        /* no bundled converter can run on iOS */
+        sysLogPrintf(LOG_ERROR, "romconvert: no sidecars for '%s' and the native conversion did not produce them", region);
+        return -1;
+#endif
+    }
 
     /* Resolve the ROM path we were given ("$S/...", "$E/..." or "./...") to
      * an absolute form for the child's argv. */
