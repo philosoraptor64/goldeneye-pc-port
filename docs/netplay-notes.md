@@ -110,8 +110,12 @@ rollback builds). `GE_NET_ROLLBACK=0` forces lockstep.
 - Outside the snapshot on purpose: audio (own thread), the scheduler and
   message queues, controller polling (joy.c), screen shake (retrace
   thread), performance graphs, the wall-clock copies, gfx task settings.
-  Sounds started in resimulated frames do play (they are not suppressed:
-  sound handles are part of game logic).
+  Sounds of resimulated frames: genet lists every sound each tick starts
+  (last 64 ticks); a resimulation pass doesn't start one that tick already
+  started, and the game gets that sound's state back (src/snd.c wrapper,
+  so the game state matches the first pass: SyncTest stays 0 bytes); a
+  sound only the corrected frames make (the other player's shot) plays, a
+  few frames late. Stats: "resim sounds skipped N new M".
 - A stage end produced by a predicted frame is settled in a boss.c hook
   before the stage unloads (genetStageExit); normally the window is already
   closed by then (the game-over screen locks the controls).

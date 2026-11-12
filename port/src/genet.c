@@ -102,6 +102,7 @@ void inputNetPure(int on);                           /* port/src/input.c */
 
 static int s_Init = 0;
 static int s_Determ = 0;
+static u32 s_SfxSkipped = 0, s_SfxLate = 0;   /* sounds of resimulated frames: skipped / new */
 static int (*s_ExtSend)(const void *data, u32 size) = NULL;
 static int (*s_ExtRecv)(void *buf, u32 cap) = NULL;
 static int s_HostPaced = 0;
@@ -871,10 +872,11 @@ static void endTick(u32 tick, u64 hash)
         n64net_input_stats st;
         n64net_input_get_stats(s_Net, &st);
         netLog("tick %u, sync checks matched %u%s, stalls %u (%.2f s), delay %u, rtt avg %u ms max %u ms, "
-               "rollbacks %u (%u ticks, max %u), skips %u, save %.2f ms",
+               "rollbacks %u (%u ticks, max %u), skips %u, save %.2f ms, resim sounds skipped %u new %u",
                tick, n64net_sync_matched(s_Net), s_DesyncReported ? " (DESYNC)" : "", s_Stalls,
                (double)s_StallUs / 1e6, n64net_input_get_delay(s_Net), st.rtt_avg_usecs / 1000,
-               st.rtt_max_usecs / 1000, s_Rollbacks, s_RollbackTicks, s_MaxDepth, s_Skips, gesnapLastSaveMs());
+               st.rtt_max_usecs / 1000, s_Rollbacks, s_RollbackTicks, s_MaxDepth, s_Skips, gesnapLastSaveMs(),
+               s_SfxSkipped, s_SfxLate);
     }
 }
 
@@ -968,11 +970,76 @@ static void menuLog(u32 tick)
     }
 }
 
+/* ---- sounds of resimulated frames (src/snd.c) ------------------------
+ * Every sound a tick starts is listed (in call order) for the last
+ * SFX_TICKS ticks. A resimulation pass of that tick matches its sounds
+ * against the list: one already started is skipped. */
+#define SFX_TICKS 64
+#define SFX_PER_TICK 48
+typedef struct { s16 idx; u8 used; void *state; void *sound; } SfxRec;
+typedef struct { u32 tick1; u32 pass; int n; SfxRec r[SFX_PER_TICK]; } SfxTick;
+static SfxTick s_Sfx[SFX_TICKS];
+static u32 s_SfxTick = 0, s_SfxPass = 0;
+static int s_SfxResim = 0, s_SfxOn = 0;
+
+static SfxTick *sfxSlot(void)
+{
+    SfxTick *t = &s_Sfx[s_SfxTick % SFX_TICKS];
+    if (t->tick1 != s_SfxTick + 1) {
+        t->tick1 = s_SfxTick + 1;
+        t->n = 0;
+        t->pass = s_SfxPass;
+    }
+    if (t->pass != s_SfxPass) {
+        t->pass = s_SfxPass;
+        for (int i = 0; i < t->n; i++) t->r[i].used = 0;
+    }
+    return t;
+}
+
+int genetSfxSkip(s16 soundIndex, void **state, void **sound)
+{
+    SfxTick *t;
+    if (!s_SfxOn || !s_SfxResim) return 0;
+    t = sfxSlot();
+    for (int i = 0; i < t->n; i++) {
+        if (!t->r[i].used && t->r[i].idx == soundIndex) {
+            t->r[i].used = 1;
+            *state = t->r[i].state;
+            *sound = t->r[i].sound;
+            s_SfxSkipped++;
+            return 1;
+        }
+    }
+    s_SfxLate++;   /* new in this pass: plays now */
+    return 0;
+}
+
+void genetSfxPlayed(s16 soundIndex, void *state, void *sound)
+{
+    SfxTick *t;
+    if (!s_SfxOn || !state) return;
+    t = sfxSlot();
+    if (t->n < SFX_PER_TICK) {
+        t->r[t->n].idx = soundIndex;
+        t->r[t->n].used = 1;
+        t->r[t->n].state = state;
+        t->r[t->n].sound = sound;
+        t->n++;
+    }
+}
+
 static s32 genetPlayback(struct contsample *samples, s32 curlast)
 {
     const u32 tick = s_Tick;
     u64 h;
     OSContPad pads[MAXCONTROLLERS];
+
+    /* the tick this frame simulates (sound list, above) */
+    s_SfxOn = s_Rollback || s_SyncTest;
+    s_SfxResim = s_Resim;
+    s_SfxTick = s_Resim ? s_ResimTick : tick;
+    s_SfxPass++;
 
     if (s_Resim) {
         /* resimulation: exactly the pads this tick used the first time */
@@ -1260,8 +1327,9 @@ static void frameBoundary(void)
             }
         }
         if (s_SyncChecks % 600 == 0) {
-            netLog("SyncTest: tick %u, %u checks, %u mismatches, snapshot %zu KB, save %.2f ms, load %.2f ms",
-                   s_Tick, s_SyncChecks, s_SyncMismatches, gesnapSize() / 1024, gesnapLastSaveMs(), gesnapLastLoadMs());
+            netLog("SyncTest: tick %u, %u checks, %u mismatches, snapshot %zu KB, save %.2f ms, load %.2f ms, resim sounds skipped %u new %u",
+                   s_Tick, s_SyncChecks, s_SyncMismatches, gesnapSize() / 1024, gesnapLastSaveMs(), gesnapLastLoadMs(),
+                   s_SfxSkipped, s_SfxLate);
         }
     }
 }

@@ -12,6 +12,10 @@
 #include "audiotrace.h"   /* D202/M-70: serialized trace writer */
 #ifdef PORT
 #include "envflag.h"   /* cached getenv for hot-path probes */
+#ifdef PORT
+#include "genet.h"     /* rollback: sounds of resimulated frames */
+ALSoundState *sndPlaySfxReal(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundState *pendingState);
+#endif
 #endif
 #endif
 //likely named gslibaudio.c from xbla
@@ -673,7 +677,11 @@ void sndHandleEvent(ALSndPlayer *sndp, ALSndpEvent *event) {
                 break;
             case AL_SNDP_PLAY_SFX_EVT:
                 if (soundState->unk3e & SOUND_FLAG_RETRIGGER) {
+#ifdef PORT
+                    sndPlaySfxReal(event->playSfx.soundBank, event->playSfx.soundIndex, soundState->state);   /* audio thread: not filtered */
+#else
                     sndPlaySfx(event->playSfx.soundBank, event->playSfx.soundIndex, soundState->state);
+#endif
                 }
                 break;
 #ifdef PORT
@@ -1047,7 +1055,11 @@ ALSoundState *sndPlaySfx(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundS
  * @param pendingState Optional pointer. If provided, its link.next pointer will be
  * to the newly created soundState.
  */
+#ifdef PORT
+ALSoundState *sndPlaySfxReal(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundState *pendingState)
+#else
 ALSoundState *sndPlaySfx(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundState *pendingState)
+#endif
 #endif
 {
     // declarations
@@ -1315,6 +1327,46 @@ ALSoundState *sndPlaySfx(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundS
 
     return nextState;
 }
+
+#if defined(PORT) && !defined(DEBUG)
+/* Rollback netplay resimulates frames that already played their sounds: a
+ * sound this tick already started in an earlier pass is not started again,
+ * and the game gets that sound's state back (so the game's state matches the
+ * first pass); a sound only the corrected frames make (e.g. the other
+ * player's shot) plays, a few frames late. port/src/genet.c keeps the list. */
+static int sndStateAlive(ALSoundState *st, ALSound *sound)
+{
+    int alive = st != NULL && st->sound == sound;
+    if (alive) {
+        OSIntMask m = osSetIntMask(OS_IM_NONE);
+        for (ALSoundState *f = D_800243E4.g_sndPlayerSoundStatePtr; f; f = (ALSoundState *)f->link.next) {
+            if (f == st) { alive = 0; break; }   /* on the free list */
+        }
+        osSetIntMask(m);
+    }
+    return alive;
+}
+
+ALSoundState *sndPlaySfx(struct ALBankAlt_s *soundBank, s16 soundIndex, ALSoundState *pendingState)
+{
+    void *prev = NULL, *prevSound = NULL;
+    ALSoundState *st;
+    if (genetSfxSkip(soundIndex, &prev, &prevSound)) {
+        st = (ALSoundState *)prev;
+        if (!sndStateAlive(st, (ALSound *)prevSound)) {
+            return NULL;   /* it has ended: as the first pass would see it by now */
+        }
+        if (pendingState != NULL) {
+            pendingState->link.next = (void *)st;
+            st->state = pendingState;
+        }
+        return st;
+    }
+    st = sndPlaySfxReal(soundBank, soundIndex, pendingState);
+    genetSfxPlayed(soundIndex, st, st ? st->sound : NULL);
+    return st;
+}
+#endif
 
 /**
  * 9C20    70009020

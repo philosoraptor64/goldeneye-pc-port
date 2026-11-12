@@ -27,6 +27,12 @@ s32 genetInitExternal(const struct genetexternal *x);   /* at game start instead
 void genetExternalEvent(s32 event);         /* the host app's session events */
 s32 genetHostPaced(void);
 
+/* src/snd.c, game thread: 1 = this sound already started for the tick being
+ * resimulated (*state/*sound: what it returned then); genetSfxPlayed records
+ * a sound that was started */
+int genetSfxSkip(s16 soundIndex, void **state, void **sound);
+void genetSfxPlayed(s16 soundIndex, void *state, void *sound);
+
 /* port/src/gesnap.c: rollback snapshots (Apple clang builds) */
 int gesnapSupported(void);
 int gesnapInit(int slots);
