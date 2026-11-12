@@ -244,8 +244,8 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
   terms) and the picture is letterboxed to 16:9; Game.SkipIntro is off for the session (restored at shutdown).
   After: 2817 ticks of per-frame hashes compared, 0 mismatches; 60/60 sync checks both sides (bots shooting).
   Mac<->phone test script: session scratchpad `phonepair.sh` (local room server 7790, Mac i64 hosts, the 14 Pro
-  joins via devicectl env). Known: the module never saves ge007.ini (soak-mode rule); in-game option changes
-  inside i64 are lost: save on stop is still to do.
+  joins via devicectl env). The module saves ge007.ini at stop (after genet has put the player's own
+  settings back, before the globals reset); checked: a changed FovScale survives a run.
 - **Pause:** `n64_game_set_paused` -> `g_portHostPaused`. Offline the game thread waits at its per-frame
   gfxFrameMsgQ receive (port layer); online genet's away handling (awayNow) holds and tells the other player. Both
   give way to the re-entry shutdown. Tested: `I64_TEST_PAUSE=300:3` offline, resume, stop.

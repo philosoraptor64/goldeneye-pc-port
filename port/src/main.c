@@ -354,7 +354,7 @@ static int geMainOnce(int argc, char **argv, int mode, int cycle)
  * point and is joined, then audio/input/video/ROM are released and the address
  * window is emptied. The caller then restores the globals. Returns 0, or -1
  * if a thread would not stop (then nothing else may be torn down). */
-static int geShutdownOnce(void)
+static int geShutdownOnce(int saveConfig)
 {
     if (portShutdownThreads(3000) != 0)
         return -1;
@@ -370,7 +370,9 @@ static int geShutdownOnce(void)
 #endif
     gfx_sdl_teardown_for_exit();
     romdataDestroy();
-    genetShutdown();
+    genetShutdown();   /* first: puts the player's own settings back (online) */
+    if (saveConfig)
+        configSave();   /* i64 module: keep option changes made in the game */
     portAddrResetWindow();
     sysLogPrintf(LOG_INFO, "shutdown: done");
     sysLogShutdown();
@@ -394,7 +396,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "soak: start %d failed (%d)\n", c, rc);
             return rc;
         }
-        if (geShutdownOnce() != 0) {
+        if (geShutdownOnce(0) != 0) {
             fprintf(stderr, "soak: shutdown %d failed (a thread would not stop)\n", c);
             return 3;
         }
@@ -434,7 +436,7 @@ int geModuleFrame(void)
  * (then the module can't be started again). */
 int geModuleStop(void)
 {
-    if (geShutdownOnce() != 0)
+    if (geShutdownOnce(1) != 0)
         return -1;
     reentryRestorePristine();
     return 0;
