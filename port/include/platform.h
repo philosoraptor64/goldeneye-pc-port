@@ -17,6 +17,8 @@
 #elif defined(__APPLE__)
   #include <TargetConditionals.h>
   #define PLATFORM_DARWIN 1   /* macOS or iOS: Mach-O, dyld, Mach VM */
+  /* NB: test the build's GE_IOS for iOS-only code, not PLATFORM_IOS:
+   * <mach-o/loader.h> defines PLATFORM_IOS (an enum value) on macOS too. */
   #if TARGET_OS_IPHONE
     #define PLATFORM_IOS 1
   #else

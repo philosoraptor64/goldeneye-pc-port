@@ -110,7 +110,7 @@ void *dramReserve(void)
 
     CloseHandle(hSec);
     return v1;
-#elif defined(PLATFORM_IOS)
+#elif defined(GE_IOS)
     /* iOS: the sandbox may refuse POSIX shared memory, so map V1 anonymously
      * inside the reserved window and alias it at the KSEG0 view with
      * vm_remap (copy = FALSE: both views share the same pages). */

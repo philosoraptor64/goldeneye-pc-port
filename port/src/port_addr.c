@@ -32,7 +32,7 @@
 #if defined(PLATFORM_MACOS) && defined(PLATFORM_ARM)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#elif defined(PLATFORM_IOS)
+#elif defined(GE_IOS)
 /* The iOS SDK blocks <mach/mach_vm.h>; vm_map is the same call with 64-bit
  * vm_address_t on arm64. */
 #include <mach/mach.h>

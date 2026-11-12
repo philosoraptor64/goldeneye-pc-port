@@ -440,7 +440,7 @@ const char *sysResolvePath(const char *path)
          * which only knew the CWD-relative path — silently failed to write.
          * Prefer CWD data/ (dev/repo workflow), else exe-dir data/, and
          * create the directory best-effort so first-run writes don't fail. */
-#if defined(PLATFORM_IOS)
+#if defined(GE_IOS)
         /* iOS: the app's Documents folder (shown in the Files app), which
          * holds the ROM, the converted data, saves and ge007.ini. */
         if (getenv("HOME"))
