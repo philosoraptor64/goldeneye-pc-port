@@ -1410,6 +1410,15 @@ static uint64_t s_rwTaskViUs;  /* D578: g_lastViUs when it was submitted */
 static int64_t s_rwTaskSubmitUs, s_rwLastDoneUs;
 static int s_rwMode = 0;       /* 0 = undecided, 1 = worker, -1 = inline */
 
+/* Rollback (genet.c): before the game thread rewrites past frames' display
+ * lists, wait until the render worker has finished the one it is drawing. */
+void portRenderWaitIdle(void)
+{
+    while (__atomic_load_n(&s_rwTask, __ATOMIC_ACQUIRE) != NULL) {
+        sysSleep(200);
+    }
+}
+
 /* D578: frame interpolation pacing (worker thread only; fast3d does the
  * drawing, see gfx_pc.cpp). A game frame is stamped with the scheduled time
  * S of the retrace it was submitted after. A present at wall time t shows sim

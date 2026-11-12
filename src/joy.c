@@ -37,7 +37,17 @@ struct contdata {
 /**
  * Contains controller data for "regular" and playback.
  */
+#ifdef PORT
+/* Rollback snapshots (port/src/gesnap.c): the scheduler thread writes the
+ * polled half, so the array stays outside the snapshot segment; the playback
+ * half (the game's input) is saved separately. */
+#ifndef GE_SNAPSHOT_OUTSIDE
+#define GE_SNAPSHOT_OUTSIDE
+#endif
+struct contdata g_ContData[CONTDATA_LEN] GE_SNAPSHOT_OUTSIDE;
+#else
 struct contdata g_ContData[CONTDATA_LEN];
+#endif
 
 #define CONT_INPUT_BUFFER_LEN                10
 #define CONT_DISABLE_POLL_SEND_BUFFER_LEN     1
@@ -861,6 +871,12 @@ s32 joyGetContDataIndex(void)
 #ifdef PORT
 /* Netplay (port/src/genet.c): this machine's newest polled pad, read on the
  * game thread when the frame's input is sampled. */
+void joyPortPlaybackData(void **p, size_t *n)
+{
+    *p = &g_ContData[CONTDATA_PLAYBACK];
+    *n = sizeof(g_ContData[CONTDATA_PLAYBACK]);
+}
+
 void joyPortLatestPad(s32 channel, OSContPad *out)
 {
     *out = g_ContData[CONTDATA_REGULAR].samples[g_ContData[CONTDATA_REGULAR].nextlast].pads[channel];

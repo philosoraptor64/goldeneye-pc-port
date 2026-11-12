@@ -62,6 +62,23 @@ int setenv(const char *name, const char *value, int overwrite);
 void _Exit(int status);
 
 void joyPortLatestPad(s32 channel, OSContPad *out);  /* src/joy.c */
+
+/* the game's frame body, for resimulation (src/boss.c's main loop runs these) */
+void updateFrameCounters(s32 deltaFrames);
+void joyConsumeSamplesWrapper(void);
+Gfx *dynGetMasterDisplayList(void);
+void lvlManageMpGame(void);
+void shuffle_player_ids(void);
+void viSetViewSize(s16 x, s16 y);
+void viSetViewPosition(s16 left, s16 top);
+void lvlViewMoveTick(void);
+Gfx *lvlRender(Gfx *gdl);
+Gfx *debmenuDraw(Gfx *gdl);
+void dynSwapBuffers(void);
+void video_related_8(void);
+void memaSingleDefragPass(void);
+void portRenderWaitIdle(void);   /* port/src/libultra.c */
+extern struct player *g_CurrentPlayer;
 void portEepromCopy(u8 *out);                        /* port/src/libultra.c */
 void portEepromAdopt(const u8 *in);
 void inputNetPure(int on);                           /* port/src/input.c */
@@ -94,6 +111,17 @@ static FILE *s_HashLog = NULL;
 static u32 s_Tick = 0;          /* frames simulated in fixed-step mode */
 static uint64_t s_NextUs = 0;   /* absolute schedule */
 static int s_PlaybackOn = 0;
+
+/* rollback / SyncTest (port/src/gesnap.c snapshots) */
+#define PAD_RING 128
+static OSContPad s_UsedPads[PAD_RING][MAXCONTROLLERS]; /* the pads each tick used */
+static int s_Resim = 0;          /* resimulating: playback replays s_UsedPads */
+static u32 s_ResimTick = 0;
+static u32 s_StageStart = 0;     /* tick of the current stage's first frame */
+static s32 s_LastStage = -999;
+static int s_SyncTest = 0;       /* GE_SYNCTEST=N: rewind N frames every frame and compare */
+static int s_SyncTestFrom = 120; /* GE_SYNCTEST_FROM: frames into a stage before testing */
+static u32 s_SyncChecks = 0, s_SyncMismatches = 0;
 
 /* online */
 static int s_Online = 0;        /* a session was set up (connect succeeded) */
@@ -765,6 +793,20 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     u64 h;
     OSContPad pads[MAXCONTROLLERS];
 
+    if (s_Resim) {
+        /* resimulation: exactly the pads this tick used the first time */
+        s32 ridx = (curlast + 1) % CONTSAMPLE_LEN;
+        for (int p = 0; p < MAXCONTROLLERS; p++) {
+            samples[ridx].pads[p] = s_UsedPads[s_ResimTick % PAD_RING][p];
+        }
+        s_ResimTick++;
+        return ridx;
+    }
+    if (g_StageNum != s_LastStage) {
+        s_LastStage = g_StageNum;
+        s_StageStart = tick;
+    }
+
     if (s_Online && (long)tick == s_TestDesync) {
         g_randomSeed ^= 0x5a5a5a5aULL;
         netLog("test desync injected at tick %u", tick);
@@ -804,6 +846,7 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     s32 idx = (curlast + 1) % CONTSAMPLE_LEN;
     for (int p = 0; p < MAXCONTROLLERS; p++) {
         samples[idx].pads[p] = pads[p];
+        s_UsedPads[tick % PAD_RING][p] = pads[p];
     }
 
     s_Tick++;
@@ -814,6 +857,9 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
                    n64net_sync_matched(s_Net), s_DesyncReported ? ", DESYNC" : "", s_Stalls, (double)s_StallUs / 1e6);
             genetShutdown();
         } else {
+            if (s_SyncTest) {
+                netLog("SyncTest: %u checks, %u mismatches", s_SyncChecks, s_SyncMismatches);
+            }
             netLog("%u frames done, quitting", s_Tick);
         }
         fflush(stderr);
@@ -915,11 +961,98 @@ static void holdWhileAway(void)
     s_NextUs = 0;
 }
 
+/* One frame of the game without presenting it: the body of src/boss.c's main
+ * loop from the frame-counter update to the memory defrag pass, minus the GPU
+ * task and the waits. The display list is built (GE ticks props, AI and
+ * auto-aim inside lvlRender) but never submitted. */
+static void resimFrame(void)
+{
+    Gfx *gdl;
+    updateFrameCounters(s_Step);
+    joyConsumeSamplesWrapper();
+    gdl = dynGetMasterDisplayList();
+    lvlManageMpGame();
+    shuffle_player_ids();
+    if (g_StageNum != 90 /* LEVELID_TITLE */) {
+        for (s32 i = 0; i < getPlayerCount(); i++) {
+            set_cur_player(get_nth_player_from_shuffled(i));
+            viSetViewSize(g_CurrentPlayer->viewx, g_CurrentPlayer->viewy);
+            viSetViewPosition(g_CurrentPlayer->viewleft, g_CurrentPlayer->viewtop);
+            lvlViewMoveTick();
+        }
+    }
+    gdl = lvlRender(gdl);
+    gdl = debmenuDraw(gdl);
+    gDPFullSync(gdl++);
+    gSPEndDisplayList(gdl++);
+    dynSwapBuffers();
+    video_related_8();
+    memaSingleDefragPass();
+}
+
+/* Rewinds to the snapshot of tick `from` and resimulates up to the current
+ * frame boundary (s_Tick). The caller made sure every tick in between is in
+ * the current stage. */
+static int rewindTo(u32 from)
+{
+    if (!gesnapLoad((int)from)) return 0;
+    portRenderWaitIdle();   /* the GPU may still read the display list we rewrite */
+    s_Resim = 1;
+    s_ResimTick = from;
+    for (u32 t = from; t < s_Tick; t++) {
+        resimFrame();
+    }
+    s_Resim = 0;
+    return 1;
+}
+
+/* Frame boundary (game thread, top of waitForNextFrame): the state before
+ * tick s_Tick. GE_SYNCTEST: save it, rewind N frames, resimulate, compare. */
+static void frameBoundary(void)
+{
+    static int init = 0;
+    if (!init) {
+        const char *e = envStr("GE_SYNCTEST");
+        init = 1;
+        if (e) {
+            s_SyncTest = atoi(e) > 0 ? atoi(e) : 1;
+            if ((e = envStr("GE_SYNCTEST_FROM"))) s_SyncTestFrom = atoi(e);
+            if (!gesnapSupported() || !gesnapInit(s_SyncTest + 2)) {
+                netLog("SyncTest: snapshots unavailable in this build");
+                s_SyncTest = 0;
+            } else {
+                netLog("SyncTest: rewinding %d frames every frame, %d frames into a stage", s_SyncTest, s_SyncTestFrom);
+            }
+        }
+    }
+    if (!s_SyncTest || !s_PlaybackOn) return;
+    gesnapSave((int)s_Tick);
+    if (g_StageNum == s_LastStage && s_Tick >= s_StageStart + (u32)s_SyncTestFrom + (u32)s_SyncTest) {
+        char report[600];
+        size_t diff;
+        const u32 from = s_Tick - (u32)s_SyncTest;
+        if (!rewindTo(from)) return;
+        diff = gesnapCompareLive((int)s_Tick, report, sizeof(report));
+        s_SyncChecks++;
+        if (diff) {
+            if (s_SyncMismatches++ < 12) {
+                netLog("SyncTest: MISMATCH before tick %u (rewound %d): %zu bytes differ:%s", s_Tick, s_SyncTest, diff, report);
+            }
+            gesnapLoad((int)s_Tick); /* go on from the original state */
+        }
+        if (s_SyncChecks % 600 == 0) {
+            netLog("SyncTest: tick %u, %u checks, %u mismatches, snapshot %zu KB, save %.2f ms, load %.2f ms",
+                   s_Tick, s_SyncChecks, s_SyncMismatches, gesnapSize() / 1024, gesnapLastSaveMs(), gesnapLastLoadMs());
+        }
+    }
+}
+
 /* Called from waitForNextFrame (game thread) in fixed-step mode: waits for
  * the next slot of the schedule and returns the tick count for this frame. */
 s32 genetFrameTicks(void)
 {
     genetInit();
+    frameBoundary();
 
     if (!s_PlaybackOn) {
         s_PlaybackOn = 1;
