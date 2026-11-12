@@ -130,12 +130,14 @@ static int s_Rollback = 0;
 static u32 s_RollbackWindow = 8;     /* GE_NET_ROLLBACK_WINDOW: ticks ahead of confirmed input */
 static u32 s_RollbackFrom = 60;      /* GE_NET_ROLLBACK_FROM: frames into a match before it opens */
 static int s_WindowOpen = 0;
+static u32 s_BaseDelay = 2;          /* GE_NET_DELAY: the auto delay's floor */
 static u32 s_Rollbacks = 0, s_RollbackTicks = 0, s_MaxDepth = 0, s_Skips = 0;
 static int s_LoadWaited = 0;
 static u64 s_HashRing[HASH_RING];
 static u32 s_HashRingTick[HASH_RING];   /* tick + 1 (0 = empty) */
 static long s_LastFlushed = -1;
 extern s32 g_MainStageNum;             /* src/boss.c: >= 0 = the stage is ending */
+s32 lvlGetControlsLockedFlag(void);    /* src/game/lv.c: the match is over (or a cutscene) */
 
 /* online */
 static int s_Online = 0;        /* a session was set up (connect succeeded) */
@@ -574,6 +576,7 @@ int genetConnect(void)
         cfg.local_player = s_Local;
         cfg.session_id = (u32)(s_Seed ^ (s_Seed >> 32));
         cfg.input_delay = (s = envStr("GE_NET_DELAY")) ? (u32)atoi(s) : 2;
+        s_BaseDelay = cfg.input_delay;
         cfg.rollback_window = 0; /* lockstep */
         cfg.ticks_per_second = 60 / s_Step;
         cfg.send = netSend;
@@ -587,7 +590,8 @@ int genetConnect(void)
             /* snapshots are set up at the first frame (rollbackPoint): the
              * audio heap they leave out is reported by the game's boot */
         }
-        n64net_input_set_auto_delay(s_Net, cfg.input_delay, s_Rollback ? 3 : 6);
+        /* lockstep (menus) tolerates a longer delay; rollback keeps it short (rollbackPoint) */
+        n64net_input_set_auto_delay(s_Net, cfg.input_delay, 6);
     }
 
     s_Online = 1;
@@ -847,6 +851,16 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     if (g_StageNum != s_LastStage) {
         s_LastStage = g_StageNum;
         s_StageStart = tick;
+        {
+            /* test aid: GE_NET_TEST_MPTIME=<seconds> shortens a multiplayer
+             * match (every machine must use the same value) */
+            extern s32 g_MpTime;
+            const char *e = envStr("GE_NET_TEST_MPTIME");
+            if (e && g_StageNum != 90) {
+                g_MpTime = atoi(e) * 60;
+                netLog("test: match time limit %d s", atoi(e));
+            }
+        }
     }
 
     if (s_Online && (long)tick == s_TestDesync) {
@@ -1230,10 +1244,17 @@ static void rollbackPoint(void)
             }
         }
     }
+    /* only while the match is being played: once it's over (game-over screen,
+     * controls locked) the stage end follows on button presses, and the
+     * frames that end it (music, sound) must never be re-run */
     want = g_StageNum != 90 && g_StageNum == s_LastStage && getPlayerCount() >= 2 && g_MainStageNum < 0 &&
-           T >= s_StageStart + s_RollbackFrom;
+           T >= s_StageStart + s_RollbackFrom && lvlGetControlsLockedFlag() == 0;
     if (!s_WindowOpen && want) {
         n64net_input_set_window(s_Net, s_RollbackWindow);
+        n64net_input_set_auto_delay(s_Net, s_BaseDelay, 3);
+        if (n64net_input_get_delay(s_Net) > 3) {
+            n64net_input_set_delay(s_Net, 3);   /* both machines open the window on the same tick */
+        }
         s_WindowOpen = 1;
         netLog("rollback on (tick %u)", T);
     } else if (s_WindowOpen && !want) {
@@ -1245,6 +1266,7 @@ static void rollbackPoint(void)
     }
     if (closing) {
         n64net_input_set_window(s_Net, 0);
+        n64net_input_set_auto_delay(s_Net, s_BaseDelay, 6);
         s_WindowOpen = 0;
         netLog("rollback off (tick %u)", T);
     }
@@ -1259,6 +1281,7 @@ int genetStageExit(void)
     waitConfirmed(T);
     runRollback(T);
     n64net_input_set_window(s_Net, 0);
+    n64net_input_set_auto_delay(s_Net, s_BaseDelay, 6);
     s_WindowOpen = 0;
     if (g_MainStageNum < 0) {
         netLog("rollback: the stage end at tick %u was a misprediction; playing on", T);
