@@ -154,8 +154,14 @@ tools/vmprobe-iphone14pro.txt):
 - **0x3_0000_0000: all four regions fit** (the only one).
 - 0x4_0000_0000 and up (incl. the macOS default 0x1000_0000_0000): KERN_INVALID_ADDRESS: an app's address space ends
   near 0x4_4000_0000 (~17 GB) without the extended-virtual-addressing entitlement (not available to free teams).
-- CMakeLists.txt: device builds (GE_IOS + iphoneos sysroot) now default to PORT_ADDR_BASE=0x300000000; the
-  Simulator keeps 0x100000000000.
+- CMakeLists.txt: device builds (GE_IOS and a sysroot not matching [Ss]imulator; the sysroot is the full
+  .../iPhoneOS27.2.sdk path and MATCHES is case-sensitive) default to PORT_ADDR_BASE=0x300000000; the Simulator keeps
+  0x100000000000. Reconfigure an old build folder with `-UPORT_ADDR_BASE` (cached value).
+- **Device build compiles + links with that base** (2026-11-12): configure as the Simulator row of the table with
+  `-DCMAKE_OSX_SYSROOT=iphoneos` and the device SDL (~/Developer/N64/deps-ios/sdl2 on the MacBook) ->
+  build-ios/ge007.aarch64.app. Not installed: the 14 Pro is at the free-profile limit of 3 apps (i64, Perfect Dark,
+  Starship); the user must pick one to remove. Then: stub profile for its bundle id, codesign, devicectl install, copy
+  the ROM + pcmodels-ntsc-final/ + pccg-ntsc-final/ (Mac converters) into Documents.
 Caveats: the probe ran inside PD after PD's own allocations (16 MB heap + 32 MB ROM), so GoldenEye's heap may sit
 differently: reserve the window first thing in main (port_addr.c) and log vm_region on failure. Re-probe on the Duo
 (iPhone19,4, more RAM) when it's back. Next: G1 device build with this base, sign (stub profile, existing cert),
