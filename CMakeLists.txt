@@ -163,7 +163,15 @@ message(STATUS "Target arch: ${TARGET_ARCH} (64bit=${TARGET_IS_64BIT})")
 # overlaps 16 TiB). Fed to the compiler (-DPORT_ADDR_BASE) and to
 # scripts/gen_macho_syms.py --base for the romassets absolute symbols, so the
 # cart pairing (romdata.c CART_HOST vs romassets_*.s values) agrees.
-if(APPLE AND TARGET_ARCH MATCHES "^aarch64$")
+if(GE_IOS AND CMAKE_OSX_SYSROOT MATCHES "iphoneos")
+  # Real iPhone: apps get only ~17 GB of address space (0x4_0000_0000 and up is KERN_INVALID_ADDRESS on an
+  # iPhone 14 Pro, iOS 27), and 0x1/0x2_xxxx_xxxx hold the app's own heap. Probed with perfect_dark's PD_VMPROBE
+  # (tools/vmprobe-iphone14pro.txt there): 0x3_0000_0000 is the only 4 GB-aligned base where all four regions
+  # (+0x10000000 64 MB, +0x70000000 8 MB, +0x80000000 8 MB, +0xA0000000 144 MB) can be reserved. Reserve them as
+  # early as possible at startup, before other allocations can land there. (The Simulator runs in the Mac's
+  # address space and keeps the macOS base below.)
+  set(PORT_ADDR_BASE 0x300000000 CACHE STRING "Host base of the N64 address window (iPhone device)")
+elseif(APPLE AND TARGET_ARCH MATCHES "^aarch64$")
   set(PORT_ADDR_BASE 0x100000000000 CACHE STRING "Host base of the N64 address window (arm64 macOS)")
 else()
   set(PORT_ADDR_BASE 0x0 CACHE STRING "Host base of the N64 address window")

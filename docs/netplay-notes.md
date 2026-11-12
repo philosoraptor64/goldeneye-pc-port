@@ -145,3 +145,18 @@ rollback builds). `GE_NET_ROLLBACK=0` forces lockstep.
   regions are free; not known yet (needs a run on a phone).
 - Not done: signing/installing on a phone (MacBook), touch controls (use a Bluetooth controller), on-device
   data conversion.
+
+## G1: iPhone address window (MacBook, 2026-11-12, branch `ios-device`)
+Probed on the iPhone 14 Pro (iPhone15,2, iOS 27) with perfect_dark's `PD_VMPROBE=1` (port/src/vmprobe.c there: tries
+the four regions at every 4 GB-aligned base with vm_map VM_FLAGS_FIXED, non-clobbering; full output in perfect_dark
+tools/vmprobe-iphone14pro.txt):
+- 0x1_0000_0000 and 0x2_0000_0000: KERN_NO_SPACE (the app's own mappings: heap around 0x2_C000_0000-0x3_0000_0000).
+- **0x3_0000_0000: all four regions fit** (the only one).
+- 0x4_0000_0000 and up (incl. the macOS default 0x1000_0000_0000): KERN_INVALID_ADDRESS: an app's address space ends
+  near 0x4_4000_0000 (~17 GB) without the extended-virtual-addressing entitlement (not available to free teams).
+- CMakeLists.txt: device builds (GE_IOS + iphoneos sysroot) now default to PORT_ADDR_BASE=0x300000000; the
+  Simulator keeps 0x100000000000.
+Caveats: the probe ran inside PD after PD's own allocations (16 MB heap + 32 MB ROM), so GoldenEye's heap may sit
+differently: reserve the window first thing in main (port_addr.c) and log vm_region on failure. Re-probe on the Duo
+(iPhone19,4, more RAM) when it's back. Next: G1 device build with this base, sign (stub profile, existing cert),
+copy ROM + pcmodels/pccg sidecars to Documents, boot.
