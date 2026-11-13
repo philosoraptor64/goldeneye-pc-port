@@ -45,6 +45,34 @@
 
 uintptr_t g_portImageBase = 0;
 int g_portUseImageRel = 0;
+uint32_t g_portImageSize = 0;
+
+#if defined(PORT_COMPACT_WINDOW)
+#include <mach-o/loader.h>
+/* vm size of the Mach-O image at `base` (its segments, without __PAGEZERO) */
+static uint32_t portImageVmSize(uintptr_t base)
+{
+    const struct mach_header_64 *h = (const struct mach_header_64 *)base;
+    if (!h || h->magic != MH_MAGIC_64) return 0;
+    const uint8_t *lc = (const uint8_t *)(h + 1);
+    uint64_t lo = ~0ull, hi = 0;
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        const struct load_command *c = (const struct load_command *)lc;
+        if (c->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)c;
+            const char *pz = "__PAGEZERO";
+            int isPageZero = 1;
+            for (int k = 0; k < 11; k++) if (sg->segname[k] != pz[k]) { isPageZero = 0; break; }
+            if (sg->vmsize && !isPageZero) {
+                if (sg->vmaddr < lo) lo = sg->vmaddr;
+                if (sg->vmaddr + sg->vmsize > hi) hi = sg->vmaddr + sg->vmsize;
+            }
+        }
+        lc += c->cmdsize;
+    }
+    return hi > lo ? (uint32_t)(hi - lo) : 0;
+}
+#endif
 
 #include "reentry.h"
 /* R1: the regions stay reserved across re-entry cycles (portAddrResetWindow
@@ -85,8 +113,10 @@ static void portAddrDescribe(unsigned long long start, unsigned long long end, c
  * the rest is never touched, so the OS keeps it. */
 static const struct { unsigned long long off, size; const char *what; } kPortRegions[] = {
     { PORT_CART_OFF,          PORT_CART_RESERVE,      "cart (ROM + sidecars)" },
-    { 0x70000000ULL,          PORT_DRAM_SIZE,         "DRAM" },
+    { PORT_DRAM_V1_OFF,       PORT_DRAM_SIZE,         "DRAM" },
+#if !defined(PORT_COMPACT_WINDOW)
     { 0x80000000ULL,          PORT_DRAM_SIZE,         "DRAM KSEG0 mirror" },
+#endif
     { PORT_STACK_REGION_OFF,  PORT_STACK_REGION_SIZE, "thread stacks" },
 };
 #define PORT_NREGIONS ((int)(sizeof(kPortRegions) / sizeof(kPortRegions[0])))
@@ -120,7 +150,7 @@ static void portAddrSelfTest(void)
     ok &= portAddrCheck("n64->host cart",
                         portN64ToHost(0x10456789u) == (void *)(B + 0x10456789u));
     ok &= portAddrCheck("cfb_16 at base+DRAM_V1",
-                        (uintptr_t)cfb_16 == B + 0x70000000u);
+                        (uintptr_t)cfb_16 == B + (uintptr_t)PORT_DRAM_V1_OFF);
     ok &= portAddrCheck("in-window: NULL rejected",
                         !portAddrIsMapped(0));
     ok &= portAddrCheck("in-window: low guard",
@@ -162,10 +192,14 @@ static void portAddrSelfTest(void)
 static int portAddrRegionOk(uint32_t a)
 {
     if (a >= 0x10000000u && a <= 0x1fffffffu) return 1;   /* cart + sidecars */
+#if defined(PORT_COMPACT_WINDOW)
+    if (a - PORT_IMAGE_REL_OFF < g_portImageSize) return 1;                       /* image-relative */
+#else
     if (a >= 0x40000000u && a <= 0x6fffffffu) return 1;   /* image-relative  */
-    if (a >= 0x70000000u && a <= 0x707fffffu) return 1;   /* DRAM V1         */
+#endif
+    if (a - (uint32_t)PORT_DRAM_V1_OFF < (uint32_t)PORT_DRAM_SIZE) return 1;      /* DRAM V1        */
     if (a >= 0x80000000u && a <= 0x807fffffu) return 1;   /* DRAM V2         */
-    if (a >= 0xa0000000u && a <= 0xbfffffffu) return 1;   /* thread stacks   */
+    if (a - (uint32_t)PORT_STACK_REGION_OFF < (uint32_t)PORT_STACK_REGION_SIZE) return 1;   /* thread stacks */
     return 0;
 }
 
@@ -228,6 +262,18 @@ int portAddrInit(void)
      * (image at 0x20000000, inside the window), true on Windows (0x140000000)
      * and macOS (0x1_00xxxxxx + slide). */
     g_portUseImageRel = (g_portImageBase >= (uintptr_t)PORT_ADDR_WINDOW) ? 1 : 0;
+#if defined(PORT_COMPACT_WINDOW)
+    /* image-relative values (0x40000000 + offset) name only the image's real extent; i64 keeps
+     * 0x1_4000_0000..+64 MB reserved so no other memory can produce such a value */
+    g_portUseImageRel = 1;
+    g_portImageSize = portImageVmSize(g_portImageBase);
+    if (g_portImageSize == 0 || g_portImageSize > (64u << 20)) {
+        snprintf(g_portAddrError, sizeof(g_portAddrError),
+                 "portAddr: the module image is %u MB (the compact window allows 64)", g_portImageSize >> 20);
+        sysLogPrintf(LOG_ERROR, "%s", g_portAddrError);
+        return -1;
+    }
+#endif
 
 #if PORT_ADDR_BASE != 0
     if (!s_windowReserved) {
@@ -292,12 +338,12 @@ int portAddrInit(void)
 
     /* The committed .darwin.s absolute symbols must have been generated with
      * the same --base; cfb_16 is a region-independent sentinel for that. */
-    if ((uintptr_t)cfb_16 != (uintptr_t)PORT_ADDR_BASE + 0x70000000ULL) {
+    if ((uintptr_t)cfb_16 != (uintptr_t)PORT_DRAM_V1_BASE) {
         sysFatalError("portAddr: dram_syms base mismatch (cfb_16=%p, expected 0x%llx). "
                       "Regenerate with: scripts/gen_romassets.py <region> --darwin "
                       "--base 0x%llx --rom-size <size> --out ... --dram-out ...",
                       (void *)cfb_16,
-                      (unsigned long long)((uintptr_t)PORT_ADDR_BASE + 0x70000000ULL),
+                      (unsigned long long)((uintptr_t)PORT_DRAM_V1_BASE),
                       (unsigned long long)PORT_ADDR_BASE);
     }
 
@@ -334,12 +380,17 @@ void portAddrResetWindow(void)
         if (kr != KERN_SUCCESS)
             sysFatalError("portAddr: cannot reset region %d (%s)", (int)i, mach_error_string(kr));
     }
+#if defined(PORT_COMPACT_WINDOW)
+    /* the pieces go back to i64's game memory arena (wiped after stop): claim them again at the next start */
+    s_windowReserved = 0;
+#endif
 #undef regions
 #endif
 }
 
-#if defined(GE_I64_MODULE) && PORT_ADDR_BASE != 0
-/* i64 module: reserve the window when i64 loads the module (it does that when
+#if defined(GE_I64_MODULE) && PORT_ADDR_BASE != 0 && !defined(PORT_COMPACT_WINDOW)
+/* (In the compact layout i64's game memory arena already holds the pieces: take_reserved.)
+ * i64 module: reserve the window when i64 loads the module (it does that when
  * it lists its games at launch), before the app's own heap can grow into it
  * (on an iPhone the only base that fits sits right above the heap). On
  * failure nothing stays reserved and portAddrInit reports it at start. */

@@ -230,6 +230,15 @@ endif()
 option(GE_I64_MODULE "Build the game as an i64 module (libge007_i64.dylib)" OFF)
 if(GE_I64_MODULE)
   add_compile_definitions(GE_I64_MODULE=1)
+  # The compact window inside i64 (Apple: iOS 27 and macOS 27 put the system's shared region at
+  # 0x1_8000_0000-0xF_C000_0000, leaving one free 4 GB slot below it). Base 0x1_0000_0000; the pieces
+  # (cart 0x1_1000_0000, thread stacks 0x1_3000_0000, RAM 0x1_7000_0000; no KSEG0 mirror mapping) are
+  # reserved by i64's executable at load time (i64 core/i64_reserve.cpp), before anything else exists.
+  if(APPLE AND NOT CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+    set(PORT_ADDR_BASE 0x100000000 CACHE STRING "Host base of the N64 address window" FORCE)
+    add_compile_definitions(PORT_COMPACT_WINDOW=1)
+    set(GE_COMPACT_WINDOW ON)
+  endif()
 endif()
 add_subdirectory(port/convert)
 add_subdirectory(port/hostlib)
@@ -732,6 +741,7 @@ if(APPLE)
     COMMAND "${CMAKE_C_COMPILER}" "-E"
             "-I${CMAKE_SOURCE_DIR}/port/include"
             "-DPORT_ADDR_BASE=${PORT_ADDR_BASE}"
+            $<$<BOOL:${GE_COMPACT_WINDOW}>:-DPORT_COMPACT_WINDOW=1>
             ${_dram_syms_pp_def}
             "${SRC_DRAM_SYMS_INPUT}"
             "-o" "${SRC_DRAM_SYMS_EXPANDED}"

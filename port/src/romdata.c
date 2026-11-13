@@ -478,7 +478,13 @@ void romdataDestroy(void)
 #if defined(PLATFORM_WINDOWS)
         VirtualFree((LPVOID)CART_HOST, 0, MEM_RELEASE);
 #else
+#if PORT_ADDR_BASE != 0
+        /* back to reserved (PROT_NONE), not unmapped: the cart region belongs to the window (inside i64,
+         * to i64's game memory arena), and a hole could be filled by another thread's allocation */
+        mmap((void *)CART_HOST, (size_t)mappedLen, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+#else
         munmap((void *)CART_HOST, (size_t)mappedLen);
+#endif
         mappedLen = 0;
 #endif
         mappedAtCartBase = 0;

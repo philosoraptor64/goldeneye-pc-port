@@ -119,6 +119,7 @@ void *dramReserve(void)
     if (v1 == MAP_FAILED || v1 != (void *)DRAM_V1_BASE) {
         sysFatalError("dram: could not map DRAM at %p", (void *)DRAM_V1_BASE);
     }
+#if !defined(PORT_COMPACT_WINDOW)   /* compact window: no KSEG0 mirror (portN64ToHost maps it to V1) */
     {
         vm_address_t dst = (vm_address_t)DRAM_K0_BASE;
         vm_prot_t cur, max;
@@ -133,6 +134,7 @@ void *dramReserve(void)
     if (((volatile char *)DRAM_K0_BASE)[0] != 0x5A) {
         sysFatalError("dram: V1/V2 views do not share a backing store");
     }
+#endif
     ((volatile char *)v1)[0] = 0;
     return v1;
 #else
@@ -161,6 +163,7 @@ void *dramReserve(void)
         sysFatalError("dram: could not map DRAM at %p", (void *)DRAM_V1_BASE);
     }
 
+#if !defined(PORT_COMPACT_WINDOW)   /* compact window: no KSEG0 mirror (portN64ToHost maps it to V1) */
     void *v2 = mmap((void *)DRAM_K0_BASE, DRAM_SIZE, PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_FIXED, fd, 0);
     if (v2 == MAP_FAILED || v2 != (void *)DRAM_K0_BASE) {
@@ -172,6 +175,7 @@ void *dramReserve(void)
     if (((volatile char *)v2)[0] != 0x5A) {
         sysFatalError("dram: V1/V2 views do not share a backing store");
     }
+#endif
     ((volatile char *)v1)[0] = 0;
 
     close(fd);

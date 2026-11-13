@@ -82,8 +82,28 @@
  * -DPORT_DRAM_V1_BASE=0x90000000 for C, CXX and ASM). On x86_64 the
  * defaults expand to exactly the pre-unification literals.
  */
+#ifdef PORT_COMPACT_WINDOW
+/* Inside i64 on Apple (CMake: GE_I64_MODULE): GoldenEye lives in i64's game memory arena (i64
+ * core/i64_reserve.cpp, docs/game-memory-arena.md), which starts at 0x1_1000_0000 in the one 4 GB slot iOS 27 /
+ * macOS 27 leave below the system's shared region. Window base 0x1_0000_0000; everything packed into
+ * 0x1000_0000..0x3400_0000 (host 0x1_1000_0000..0x1_3400_0000, 576 MB):
+ *   0x10000000 cart (64 MB)   0x18000000 RAM V1 (8 MB)   0x20000000 thread stacks (144 MB)
+ *   0x30000000 image-relative encoding (the module's own globals, up to 64 MB)
+ * No KSEG0 mirror mapping (it would sit at 0x1_8000_0000): portN64ToHost sends 0x80xxxxxx to the V1 pages. */
+#define PORT_DRAM_V1_OFF       0x18000000ULL
+#define PORT_DRAM_V1_BASE      (PORT_ADDR_BASE + PORT_DRAM_V1_OFF)
+#define PORT_DRAM_K0_BASE      PORT_DRAM_V1_BASE   /* = V1: no separate mirror */
+#define PORT_STACK_REGION_OFF  0x20000000ULL
+#define PORT_IMAGE_REL_OFF     0x30000000u
+#endif
+#ifndef PORT_DRAM_V1_OFF
+#define PORT_DRAM_V1_OFF       0x70000000ULL
+#endif
+#ifndef PORT_IMAGE_REL_OFF
+#define PORT_IMAGE_REL_OFF     0x40000000u   /* image-relative encoding: 0x40000000..0x6fffffff */
+#endif
 #ifndef PORT_DRAM_V1_BASE
-#define PORT_DRAM_V1_BASE  (PORT_ADDR_BASE + 0x70000000UL)  /* s32-safe "virtual" view (game RAM symbols) */
+#define PORT_DRAM_V1_BASE  (PORT_ADDR_BASE + PORT_DRAM_V1_OFF)  /* s32-safe "virtual" view (game RAM symbols) */
 #endif
 #ifndef PORT_DRAM_K0_BASE
 #define PORT_DRAM_K0_BASE  (PORT_ADDR_BASE + 0x80000000UL)  /* KSEG0 mirror of V1 (same pages) */
@@ -99,7 +119,9 @@
  * non-clobbering, and the fixed mappings made later land inside them. */
 #define PORT_CART_OFF          0x10000000ULL   /* ROM + model/bg sidecars (romdata.c) */
 #define PORT_CART_RESERVE      (64ULL << 20)   /* an N64 cart is at most 64 MB, sidecars ~5 MB */
+#ifndef PORT_STACK_REGION_OFF
 #define PORT_STACK_REGION_OFF  0xA0000000ULL   /* game-thread stacks (libultra.c) */
+#endif
 #define PORT_STACK_REGION_SIZE (144ULL << 20)  /* 16 threads x (8 MB + 16 KB guard) */
 
 #ifndef __ASSEMBLER__
@@ -131,6 +153,7 @@ extern "C" {
 
 extern uintptr_t g_portImageBase;
 extern int g_portUseImageRel;
+extern uint32_t g_portImageSize;   /* the module image's vm size (compact window: image-relative range) */
 
 /* D573: exact check, implemented in port/src/romdata.c (shift-aware via
  * the arena macros above). */
@@ -181,9 +204,19 @@ static inline void *portN64ToHost(uint32_t a)
 #ifdef PORT_ADDR_STRICT
     portAddrStrictCheck(a);
 #endif
+#ifdef PORT_COMPACT_WINDOW
+    /* the module's own image (only its real size: i64 keeps the rest of 0x1_4000_0000.. reserved) */
+    if (a - PORT_IMAGE_REL_OFF < g_portImageSize) {
+        return (void *)(g_portImageBase + (uintptr_t)(a - PORT_IMAGE_REL_OFF));
+    }
+    if (a - 0x80000000u < (uint32_t)PORT_DRAM_SIZE) {
+        a = a - 0x80000000u + (uint32_t)PORT_DRAM_V1_OFF;   /* KSEG0 -> the V1 pages (no mirror mapping) */
+    }
+#else
     if (g_portUseImageRel && a >= 0x40000000u && a < 0x70000000u) {
         return (void *)(g_portImageBase + (uintptr_t)(a - 0x40000000u));
     }
+#endif
     return (void *)((uintptr_t)PORT_ADDR_BASE + (uintptr_t)a);
 }
 
@@ -193,6 +226,12 @@ static inline void *portN64ToHost(uint32_t a)
 static inline uint32_t portHostToN64(const void *p)
 {
     uintptr_t v = (uintptr_t)p;
+#ifdef PORT_COMPACT_WINDOW
+    /* the module's image may itself lie inside the window's 4 GB slot: encode it first */
+    if (v - g_portImageBase < (uintptr_t)g_portImageSize) {
+        return (uint32_t)(PORT_IMAGE_REL_OFF + (v - g_portImageBase));
+    }
+#endif
     if (v - (uintptr_t)PORT_ADDR_BASE < (uintptr_t)PORT_ADDR_WINDOW) {
         return (uint32_t)(v - (uintptr_t)PORT_ADDR_BASE);
     }
