@@ -232,6 +232,11 @@ N64_GAME_EXPORT int n64_game_pause_ready(void);
  * view/layer it attached, e.g. SDL_Metal_DestroyView, so the next start
  * doesn't stack a second one). */
 N64_GAME_EXPORT void n64_game_stop(void);
+/* Optional. Right after n64_game_frame() returned N64_GAME_FRAME_EXIT: why the
+ * game ended, for the player (e.g. "The games got out of step, so the match
+ * was stopped."). Writes "" when it ended normally (the player quit). i64 shows
+ * it in its menu. */
+N64_GAME_EXPORT void n64_game_exit_message(char* out, size_t cap);
 
 #ifdef __cplusplus
 }

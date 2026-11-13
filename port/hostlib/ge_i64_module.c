@@ -61,6 +61,7 @@ struct genetexternal {
 extern struct genetexternal *g_geNetExternal;   /* main.c */
 extern uint32_t genetSessionBlob(void *out, uint32_t cap);
 extern void genetExternalEvent(int32_t event);
+extern const char *genetEndReason(void);
 
 /* Bump when the converter's output changes: older imports are redone. */
 #define GE_CONVERT_STAMP "ge-convert-1"
@@ -325,7 +326,13 @@ N64_GAME_EXPORT n64_frame_result n64_game_frame(void)
         while ((ev = sHost->net_poll_event()) != 0)
             genetExternalEvent(ev);   /* same numbers: GENET_EXT_* = n64_net_event */
     }
+    if (genetEndReason()[0]) return N64_GAME_FRAME_EXIT;   /* a desync or the friend gone: i64 shows why */
     return geModuleFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
+}
+
+N64_GAME_EXPORT void n64_game_exit_message(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", genetEndReason());
 }
 
 N64_GAME_EXPORT void n64_game_set_paused(int paused)

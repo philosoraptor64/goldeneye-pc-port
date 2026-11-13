@@ -109,6 +109,8 @@ static int (*s_ExtSend)(const void *data, u32 size) = NULL;
 static int (*s_ExtRecv)(void *buf, u32 cap) = NULL;
 static int s_HostPaced = 0;
 static int s_ExtPeerAway = 0;
+/* inside a host app (i64): why this side ends the match ("" = it doesn't) */
+static char s_EndReason[200];
 static void startSession(void);
 static s32 s_SavedSkipIntro = 0;
 static int s_SkipIntroSaved = 0;
@@ -545,6 +547,10 @@ static void goOffline(void)
     if (s_Offline) return;
     s_Offline = 1;
     netLog("%s Playing on offline.", s_PeerLeft ? "The other player left." : "Lost the connection to the other player.");
+    if (s_ExtSend && !s_EndReason[0]) {   /* in i64: end the match instead of playing on alone */
+        snprintf(s_EndReason, sizeof(s_EndReason), "%s",
+                 s_PeerLeft ? "Your friend left the game." : "Lost the connection to your friend, so the match was stopped.");
+    }
 }
 
 static int connectFail(const char *what)
@@ -773,6 +779,10 @@ s32 genetInitExternal(const struct genetexternal *x)
             netLog("simulating %u ms + %u ms jitter, %u%% loss on sent packets", s_ExtSimLat, s_ExtSimJit, s_ExtSimLoss);
     }
     s_ExtRecv = x->recv;
+    {
+        const char *td = envStr("GE_NET_TEST_DESYNC");   /* test: as in genetConnect */
+        if (td) s_TestDesync = atoi(td);
+    }
     s_HostPaced = x->hostpaced != 0;
     s_Local = x->localplayer;
     s_IsHost = (s_Local == 0);
@@ -795,6 +805,11 @@ s32 genetInitExternal(const struct genetexternal *x)
     }
     startSession();
     return 0;
+}
+
+const char *genetEndReason(void)
+{
+    return s_EndReason;
 }
 
 void genetExternalEvent(s32 event)
@@ -994,6 +1009,10 @@ static void endTick(u32 tick, u64 hash)
     if (!s_DesyncReported && n64net_sync_desynced(s_Net, &dtick, &dkind)) {
         s_DesyncReported = 1;
         netLog("DESYNC detected at tick %u", dtick);
+        if (s_ExtSend && !s_EndReason[0]) {
+            snprintf(s_EndReason, sizeof(s_EndReason),
+                     "The two games got out of step, so the match was stopped. (Both logs have the details.)");
+        }
     }
     if (tick % STATS_EVERY == 0 && tick > 0) {
         n64net_input_stats st;
@@ -1205,7 +1224,7 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
         }
     }
 
-    if (s_Online && (long)tick == s_TestDesync) {
+    if (s_Online && s_IsHost && (long)tick == s_TestDesync) {   /* (one side only, or both change alike) */
         g_randomSeed ^= 0x5a5a5a5aULL;
         netLog("test desync injected at tick %u", tick);
     }

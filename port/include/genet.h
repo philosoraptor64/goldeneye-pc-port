@@ -25,6 +25,7 @@ enum { GENET_EXT_PEER_AWAY = 1, GENET_EXT_PEER_BACK = 2, GENET_EXT_PEER_LEFT = 3
 u32 genetSessionBlob(void *out, u32 cap);   /* host, before every run; 0 = too small */
 s32 genetInitExternal(const struct genetexternal *x);   /* at game start instead of genetConnect; 0 or -1 */
 void genetExternalEvent(s32 event);         /* the host app's session events */
+const char *genetEndReason(void);           /* in a host app: why the match ends (desync, friend gone); "" = it doesn't */
 s32 genetHostPaced(void);
 
 /* src/snd.c, game thread: 1 = this sound already started for the tick being
