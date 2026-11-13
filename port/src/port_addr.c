@@ -40,6 +40,7 @@
 #define mach_vm_size_t vm_size_t
 #define mach_vm_map vm_map
 #define mach_vm_deallocate vm_deallocate
+#define mach_vm_region vm_region_64
 #endif
 
 uintptr_t g_portImageBase = 0;
