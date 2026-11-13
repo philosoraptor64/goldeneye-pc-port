@@ -401,14 +401,43 @@ static void genetPace(void)
 
 /* i64 (genetInitExternal): the host app's game channel replaces our socket */
 
+/* GE_NET_SIM_* inside i64: the transport's simulator (gnt_sim) only covers our own socket, so the
+ * host app's channel gets this one: a delay queue (latency + jitter) and loss on this side's sends */
+#define EXT_SIM_SLOTS 512
+static struct { u64 at; u16 size; u8 data[400]; } s_ExtSimQ[EXT_SIM_SLOTS];
+static unsigned s_ExtSimN = 0, s_ExtSimLat = 0, s_ExtSimJit = 0, s_ExtSimLoss = 0;
+static u32 s_ExtSimRand = 0x6C8E9CF5u;
+static u32 extSimRand(void) { s_ExtSimRand ^= s_ExtSimRand << 13; s_ExtSimRand ^= s_ExtSimRand >> 17; s_ExtSimRand ^= s_ExtSimRand << 5; return s_ExtSimRand; }
+
+static void extSimFlush(void)
+{
+    const u64 now = gnt_now_us();
+    unsigned keep = 0;
+    for (unsigned i = 0; i < s_ExtSimN; i++) {
+        if (s_ExtSimQ[i].at <= now) s_ExtSend(s_ExtSimQ[i].data, s_ExtSimQ[i].size);
+        else s_ExtSimQ[keep++] = s_ExtSimQ[i];
+    }
+    s_ExtSimN = keep;
+}
+
 static void rawSend(const void *data, unsigned size)
 {
-    if (s_ExtSend) s_ExtSend(data, size);
-    else gnt_send(data, size);
+    if (s_ExtSend) {
+        if (!s_ExtSimLat && !s_ExtSimJit && !s_ExtSimLoss) { s_ExtSend(data, size); return; }
+        if (s_ExtSimLoss && extSimRand() % 100 < s_ExtSimLoss) return;
+        if (s_ExtSimN >= EXT_SIM_SLOTS || size > sizeof(s_ExtSimQ[0].data)) { s_ExtSend(data, size); return; }
+        s_ExtSimQ[s_ExtSimN].at = gnt_now_us() + (u64)s_ExtSimLat * 1000 + (s_ExtSimJit ? (u64)(extSimRand() % (s_ExtSimJit * 1000)) : 0);
+        s_ExtSimQ[s_ExtSimN].size = (u16)size;
+        memcpy(s_ExtSimQ[s_ExtSimN].data, data, size);
+        s_ExtSimN++;
+        return;
+    }
+    gnt_send(data, size);
 }
 
 static int rawRecv(void *buf, unsigned cap)
 {
+    if (s_ExtSend && s_ExtSimN) extSimFlush();
     return s_ExtRecv ? s_ExtRecv(buf, cap) : gnt_recv(buf, cap);
 }
 
@@ -734,6 +763,15 @@ s32 genetInitExternal(const struct genetexternal *x)
         return -1;
     }
     s_ExtSend = x->send;
+    {
+        const char *lat = envStr("GE_NET_SIM_LATENCY"), *jit = envStr("GE_NET_SIM_JITTER"), *loss = envStr("GE_NET_SIM_LOSS");
+        s_ExtSimLat = lat ? (unsigned)atoi(lat) : 0;
+        s_ExtSimJit = jit ? (unsigned)atoi(jit) : 0;
+        s_ExtSimLoss = loss ? (unsigned)atoi(loss) : 0;
+        s_ExtSimN = 0;
+        if (s_ExtSimLat || s_ExtSimJit || s_ExtSimLoss)
+            netLog("simulating %u ms + %u ms jitter, %u%% loss on sent packets", s_ExtSimLat, s_ExtSimJit, s_ExtSimLoss);
+    }
     s_ExtRecv = x->recv;
     s_HostPaced = x->hostpaced != 0;
     s_Local = x->localplayer;
