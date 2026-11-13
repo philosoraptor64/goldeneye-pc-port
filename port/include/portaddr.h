@@ -148,7 +148,9 @@ void portAddrStrictCheck(uint32_t a);
 /* Reserve the window (arm64 macOS) and record the image base. Must run
  * before any of the port's fixed mappings and before large allocations.
  * Defined by port/src/port_addr.c. */
-void portAddrInit(void);
+int portAddrInit(void);   /* 0, or -1 inside i64 when the window can't be had (g_portAddrError says why) */
+extern char g_portAddrError[512];
+extern int (*g_portHostTakeReserved)(unsigned long long addr, unsigned long long size);   /* n64_host.take_reserved */
 
 /* Result of the ROM-free self-test portAddrInit() ran (1 = all checks
  * passed). Used by `--selftest` so CI can gate on it without a ROM. */

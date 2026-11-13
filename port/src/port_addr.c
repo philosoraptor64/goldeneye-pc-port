@@ -50,6 +50,35 @@ int g_portUseImageRel = 0;
  * swaps their contents for fresh reservations); survives the globals reset. */
 GE_KEEP static int s_windowReserved = 0;
 
+/* i64 (n64_host.take_reserved, set by the module before each start): i64 reserves the
+ * window before main(), so nothing the app allocates can land in it; we take it over. */
+int (*g_portHostTakeReserved)(unsigned long long addr, unsigned long long size) = NULL;
+char g_portAddrError[512] = "";
+
+#if PORT_ADDR_BASE != 0
+/* what occupies [start, end) (failure reports: which mapping is in the way) */
+static void portAddrDescribe(unsigned long long start, unsigned long long end, char *out, size_t cap)
+{
+    size_t at = 0;
+    out[0] = '\0';
+    mach_vm_address_t addr = (mach_vm_address_t)start;
+    for (int n = 0; n < 8 && addr < end && at + 96 < cap; n++) {
+        mach_vm_size_t size = 0;
+        vm_region_extended_info_data_t info;
+        mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&info, &count,
+                           &object) != KERN_SUCCESS || addr >= end)
+            break;
+        at += (size_t)snprintf(out + at, cap - at, "%s0x%llx-0x%llx (%llu MB, prot %d, tag %u)", at ? ", " : "",
+                               (unsigned long long)addr, (unsigned long long)(addr + size),
+                               (unsigned long long)(size >> 20), info.protection, info.user_tag);
+        addr += size;
+    }
+    if (!at) snprintf(out, cap, "nothing mapped");
+}
+#endif
+
 #if PORT_ADDR_BASE != 0
 /* Only the regions the port maps (portaddr.h), not the whole 4 GiB window:
  * the rest is never touched, so the OS keeps it. */
@@ -190,7 +219,7 @@ void portAddrStrictCheck(uint32_t a)
 }
 #endif /* PORT_ADDR_STRICT */
 
-void portAddrInit(void)
+int portAddrInit(void)
 {
     g_portImageBase = sysImageBase();
     /* The image needs the 0x40000000 encoding iff it lies outside the window,
@@ -206,22 +235,53 @@ void portAddrInit(void)
          * replacing a live mapping (mmap MAP_FIXED on macOS does the latter). */
 #define regions kPortRegions
         unsigned long long total = 0;
-        for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
+        /* inside i64: map our regions over i64's reservation (atomic replace) */
+        int fromHost = g_portHostTakeReserved != NULL;
+        for (size_t i = 0; fromHost && i < sizeof(regions) / sizeof(regions[0]); i++)
+            fromHost = g_portHostTakeReserved(PORT_ADDR_BASE + regions[i].off, regions[i].size);
+        for (size_t i = 0; fromHost && i < sizeof(regions) / sizeof(regions[0]); i++) {
+            mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
+            kern_return_t kr = mach_vm_map(mach_task_self(), &addr, (mach_vm_size_t)regions[i].size, 0,
+                                           VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, FALSE,
+                                           VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+            if (kr != KERN_SUCCESS || addr != (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off)) {
+                snprintf(g_portAddrError, sizeof(g_portAddrError), "portAddr: couldn't map the %s region inside i64's "
+                         "window at 0x%llx (%s)", regions[i].what,
+                         (unsigned long long)(PORT_ADDR_BASE + regions[i].off), mach_error_string(kr));
+                sysLogPrintf(LOG_ERROR, "%s", g_portAddrError);
+                return -1;
+            }
+        }
+        for (size_t i = 0; !fromHost && i < sizeof(regions) / sizeof(regions[0]); i++) {
             mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
             kern_return_t kr = mach_vm_map(mach_task_self(), &addr,
                                            (mach_vm_size_t)regions[i].size, 0,
                                            VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
                                            VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
             if (kr != KERN_SUCCESS || addr != (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off)) {
-                sysFatalError("portAddr: cannot reserve the %s region (%llu MB) at 0x%llx (%s). "
-                              "See docs/dev/MACOS-ARM64-PLAN.md sec 2.", regions[i].what,
-                              regions[i].size >> 20,
-                              (unsigned long long)(PORT_ADDR_BASE + regions[i].off), mach_error_string(kr));
+                char occ[400];
+                portAddrDescribe(PORT_ADDR_BASE + regions[i].off, PORT_ADDR_BASE + regions[i].off + regions[i].size,
+                                 occ, sizeof(occ));
+                for (size_t j = 0; j < i; j++)   /* nothing half-reserved stays behind */
+                    mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)(PORT_ADDR_BASE + regions[j].off),
+                                       (mach_vm_size_t)regions[j].size);
+                snprintf(g_portAddrError, sizeof(g_portAddrError),
+                         "portAddr: cannot reserve the %s region (%llu MB) at 0x%llx (%s); there: %s",
+                         regions[i].what, regions[i].size >> 20,
+                         (unsigned long long)(PORT_ADDR_BASE + regions[i].off), mach_error_string(kr), occ);
+#if defined(GE_I64_MODULE)
+                sysLogPrintf(LOG_ERROR, "%s", g_portAddrError);   /* inside i64: report it, don't take i64 down */
+                return -1;
+#else
+                sysFatalError("%s. See docs/dev/MACOS-ARM64-PLAN.md sec 2.", g_portAddrError);
+#endif
             }
             total += regions[i].size;
         }
-        sysLogPrintf(LOG_INFO, "portAddr: reserved %llu MB of address space in %d regions",
-                     total >> 20, PORT_NREGIONS);
+        if (fromHost)
+            for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) total += regions[i].size;
+        sysLogPrintf(LOG_INFO, "portAddr: reserved %llu MB of address space in %d regions%s",
+                     total >> 20, PORT_NREGIONS, fromHost ? " (inside i64's window)" : "");
 #undef regions
         s_windowReserved = 1;
     } else {
@@ -249,6 +309,7 @@ void portAddrInit(void)
 #ifdef PORT_ADDR_STRICT
     portAddrStrictSelfTest();
 #endif
+    return 0;
 }
 
 

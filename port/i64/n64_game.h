@@ -134,6 +134,11 @@ typedef struct n64_host {
     void (*set_alloc_hooks)(const struct n64_alloc_hooks* hooks); /* NULL = back to malloc */
 
     void (*log)(const char* fmt, ...) __attribute__((format(printf, 1, 2))); /* [any thread] */
+
+    /* Fixed addresses: i64 reserves a window before main(); 1 if [addr, addr + size)
+     * is in it (the module then maps it with VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE).
+     * NULL in an older i64. */
+    int (*take_reserved)(uint64_t addr, uint64_t size);
 } n64_host;
 
 /* i64's executable defines the global operator new/delete and forwards them

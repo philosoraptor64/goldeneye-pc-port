@@ -39,6 +39,8 @@
 
 /* main.c / audio.c / system.c / gfx_sdl2.cpp (game side) */
 extern int geModuleStart(void);
+extern int (*g_portHostTakeReserved)(unsigned long long addr, unsigned long long size);   /* port_addr.c */
+extern char g_portAddrError[512];
 extern int geModuleFrame(void);
 extern int geModuleStop(void);
 extern void audioSetHostOutput(void (*write)(const short *, unsigned, unsigned), unsigned (*buffered)(unsigned));
@@ -298,8 +300,15 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         ext.hostpaced = 0;   /* the game's own threads keep its schedule */
         g_geNetExternal = &ext;
     }
+    g_portHostTakeReserved = (int (*)(unsigned long long, unsigned long long))host->take_reserved;
+    g_portAddrError[0] = '\0';
     if (geModuleStart() != 0) {
-        snprintf(err, err_size, "the game couldn't start (see ge007.log in its data folder)");
+        if (g_portAddrError[0]) {
+            snprintf(err, err_size, "GoldenEye couldn't get the memory it needs at its fixed addresses. "
+                     "Quit i64 completely and start GoldenEye again. (%s)", g_portAddrError);
+        } else {
+            snprintf(err, err_size, "the game couldn't start (see ge007.log in its data folder)");
+        }
         /* partly started: undo what can be undone */
         if (geModuleStop() != 0) sBroken = 1;
         return 1;

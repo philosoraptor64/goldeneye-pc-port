@@ -174,7 +174,9 @@ static int geMainOnce(int argc, char **argv, int mode, int cycle)
      * allocates (macOS: 4 GiB PROT_NONE; elsewhere a no-op). Must precede
      * crashInit so the reservation is in place for every later stage, and any
      * failure here is reported before SDL/GL are involved. */
-    portAddrInit();
+    if (portAddrInit() != 0) {
+        return 1;   /* inside i64: the module reports it (g_portAddrError); stand-alone it aborted already */
+    }
 
     /* Crash handler first, so any failure below is debuggable. Not inside i64
      * (the host's process keeps its own handlers). */
