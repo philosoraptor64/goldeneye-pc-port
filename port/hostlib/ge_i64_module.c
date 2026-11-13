@@ -25,6 +25,7 @@
 #if defined(GE_I64_MODULE)
 
 #define N64_GAME_BUILDING_MODULE 1
+#include <stdint.h>
 #include "../i64/n64_game.h"
 
 #include "ge_convert.h"
@@ -244,6 +245,22 @@ static unsigned hostAudioBuffered(unsigned rate)
     return sAudioBuffered ? sAudioBuffered(rate) : 0;
 }
 
+/* i64's home screen: a picture of the game 30 s into each run, then every minute (fast3d/gfx_metal.mm captures it);
+ * tests: I64_TEST_PREVIEW_AT="400,700" */
+extern volatile int gPortFrameCaptureRequest;
+extern void (*gPortFrameCaptureCallback)(const uint8_t *rgba, uint32_t w, uint32_t h);
+static unsigned sPreviewFrames;
+static int previewDue(unsigned f)
+{
+    const char *at = getenv("I64_TEST_PREVIEW_AT");
+    if (at) {
+        for (const char *q = at; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL)
+            if ((unsigned)atoi(q) == f) return 1;
+        return 0;
+    }
+    return f >= 1800 && (f - 1800) % 3600 == 0;
+}
+
 N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launch, char *err, size_t err_size)
 {
     if (sRunning) {
@@ -283,6 +300,8 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
     /* first start: what the module has done so far is static initialisation */
     reentrySavePristine();
     sHost = host;
+    sPreviewFrames = 0;
+    gPortFrameCaptureCallback = host->offer_title_art;
     sAudioWrite = host->audio_write;
     sAudioBuffered = host->audio_buffered;
     /* game-side settings (reset with the globals after every run) */
@@ -318,9 +337,11 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
     return 0;
 }
 
+
 N64_GAME_EXPORT n64_frame_result n64_game_frame(void)
 {
     if (!sRunning) return N64_GAME_FRAME_EXIT;
+    if (previewDue(++sPreviewFrames) && gPortFrameCaptureCallback) gPortFrameCaptureRequest = 1;
     if (sHost && sHost->net_poll_event) {
         int ev;
         while ((ev = sHost->net_poll_event()) != 0)
@@ -343,6 +364,8 @@ N64_GAME_EXPORT void n64_game_set_paused(int paused)
 N64_GAME_EXPORT void n64_game_stop(void)
 {
     if (!sRunning) return;
+    gPortFrameCaptureCallback = NULL;
+    gPortFrameCaptureRequest = 0;
     if (geModuleStop() != 0) sBroken = 1;
     sRunning = 0;
     sHost = NULL;
