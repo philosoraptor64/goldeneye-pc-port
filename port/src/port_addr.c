@@ -322,6 +322,9 @@ int portAddrInit(void)
 void portAddrResetWindow(void)
 {
 #if PORT_ADDR_BASE != 0
+    /* never had the window (its start failed): nothing of ours to reset. Overwriting the range then
+     * hit someone else's mapping and aborted i64 (iPhone "Duo": a system region there) */
+    if (!s_windowReserved) return;
 #define regions kPortRegions
     for (size_t i = 0; i < sizeof(regions) / sizeof(regions[0]); i++) {
         mach_vm_address_t addr = (mach_vm_address_t)(PORT_ADDR_BASE + regions[i].off);
