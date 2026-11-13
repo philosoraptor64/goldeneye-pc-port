@@ -22,6 +22,9 @@
 /* NOTE: no <sched.h> here — angle-bracket form would resolve to the game's
  * src/sched.h (it is on the include path), not MinGW's. osYieldThread uses a
  * short sleep instead of sched_yield(). */
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1267,12 +1270,26 @@ void portEepromAdopt(const u8 *in)
 static void geEepromStore(void)
 {
     if (s_eepromNoStore) return;
+    /* a temporary file that then replaces the save in one step: stopped mid-write (a crash,
+     * iOS ending the app, i64 stopping the game), the old save stays whole instead of empty */
     const char *path = sysResolvePath(GE_EEP_PATH);
-    FILE *fp = fopen(path, "wb");
-    if (fp) {
-        fwrite(s_eeprom, 1, GE_EEP_SIZE, fp);
-        fclose(fp);
-    } else {
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *fp = fopen(tmp, "wb");
+    int ok = fp != NULL;
+    if (ok) {
+        ok = fwrite(s_eeprom, 1, GE_EEP_SIZE, fp) == GE_EEP_SIZE && fflush(fp) == 0;
+#ifndef _WIN32
+        if (ok) ok = fsync(fileno(fp)) == 0;
+#endif
+        if (fclose(fp) != 0) ok = 0;
+#ifdef _WIN32
+        if (ok) remove(path); /* rename doesn't replace on Windows */
+#endif
+        if (ok) ok = rename(tmp, path) == 0;
+        if (!ok) remove(tmp);
+    }
+    if (!ok) {
         sysLogPrintf(LOG_ERROR, "eeprom: cannot write %s", path);
     }
 }
