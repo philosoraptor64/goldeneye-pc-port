@@ -27,7 +27,19 @@
 #include "platform.h"
 #include "crash.h"
 
-#define CRASH_LOG_FNAME "ge007.crash.log"
+#define CRASH_LOG_NAME "ge007.crash.log"
+/* in the module's data folder inside i64 (g_sysDataDir, system.c), else the current folder */
+extern char g_sysDataDir[];
+static const char *crashLogPath(void)
+{
+    static char path[1100];
+    if (g_sysDataDir[0]) {
+        snprintf(path, sizeof(path), "%s/%s", g_sysDataDir, CRASH_LOG_NAME);
+        return path;
+    }
+    return CRASH_LOG_NAME;
+}
+#define CRASH_LOG_FNAME crashLogPath()
 #define CRASH_MAX_MSG 8192
 #define CRASH_MAX_SYM 256
 #define CRASH_MAX_FRAMES 32
