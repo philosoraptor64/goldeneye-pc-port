@@ -1295,35 +1295,59 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     return idx;
 }
 
-/* Netplay full view (port/fast3d/gfx_pc.cpp): online, in a split-screen match,
- * this machine shows only its own player's view, zoomed to the window. Set on
- * the game thread each frame, read by the render thread. GE_NET_VIEW=split
- * keeps the split screen; GE_NET_FULLVIEW=<player 1-4> forces it (tests). */
+/* Netplay views (port/fast3d/gfx_pc.cpp): online, in a split-screen match,
+ * this machine shows only its own players' views, zoomed to the window. The
+ * game's split stays as it is on every machine (the viewports feed aiming, so
+ * they must match); the renderer shows the box around this machine's players'
+ * viewports. Players are numbered consecutively per machine, so one machine's
+ * players sit side by side in the game's split (2 of 4: a half; 1: a quarter
+ * or half). Set on the game thread each frame, read by the render thread.
+ * GE_NET_VIEW=split keeps the split screen; GE_NET_FULLVIEW=<players 1-4>, e.g.
+ * "2" or "1,2", forces it (tests, offline too). */
 static volatile int s_ViewOn = 0, s_ViewL = 0, s_ViewT = 0, s_ViewW = 0, s_ViewH = 0;
 
 static void updateFullView(void)
 {
-    static int mode = -2;   /* -1 off, 0 auto (online), 1..4 forced player */
+    static int mode = -2;      /* -1 off, 0 auto (online), 1 forced */
+    static int forced = 0;     /* GE_NET_FULLVIEW: bit per player */
     s32 np;
-    int me;
-    struct player *pl;
+    int mask, i, n = 0, l = 1 << 30, t = 1 << 30, r = -1, b = -1;
     if (mode == -2) {
         const char *v = envStr("GE_NET_VIEW"), *f = envStr("GE_NET_FULLVIEW");
-        mode = (v && strcmp(v, "split") == 0) ? -1 : (f ? atoi(f) : 0);
+        for (const char *q = f; q && *q; q++) {
+            if (*q >= '1' && *q <= '4') forced |= 1 << (*q - '1');
+        }
+        mode = (v && strcmp(v, "split") == 0) ? -1 : (forced ? 1 : 0);
     }
     np = (g_StageNum != 90 /* title / menus */) ? getPlayerCount() : 1;
-    me = mode > 0 ? mode - 1 : s_Local;
-    pl = (me >= 0 && me < 4) ? g_playerPointers[me] : NULL;
-    if (mode < 0 || (mode == 0 && !s_Online) || np < 2 || me >= np || !pl || !portAddrIsMapped(pl) ||
-        pl->viewx <= 0 || pl->viewy <= 0 || pl->viewx > 320 || pl->viewy >= 200) {
-        s_ViewOn = 0;   /* not a split view (yet): normal output */
+    mask = mode > 0 ? forced : (1 << s_Local);   /* later: every local player from i64's player table */
+    if (mode < 0 || (mode == 0 && !s_Online) || np < 2) {
+        s_ViewOn = 0;
         return;
     }
-    /* the player's own viewport (N64 320x240 units), as the game set it */
-    s_ViewL = pl->viewleft;
-    s_ViewT = pl->viewtop;
-    s_ViewW = pl->viewx;
-    s_ViewH = pl->viewy;
+    for (i = 0; i < np && i < 4; i++) {
+        struct player *pl = g_playerPointers[i];
+        if (!(mask & (1 << i))) continue;
+        if (!pl || !portAddrIsMapped(pl) || pl->viewx <= 0 || pl->viewy <= 0 || pl->viewx > 320 ||
+            pl->viewy >= 200) {
+            s_ViewOn = 0;   /* not a split view (yet): normal output */
+            return;
+        }
+        /* each player's own viewport (N64 320x240 units), as the game set it */
+        if (pl->viewleft < l) l = pl->viewleft;
+        if (pl->viewtop < t) t = pl->viewtop;
+        if (pl->viewleft + pl->viewx > r) r = pl->viewleft + pl->viewx;
+        if (pl->viewtop + pl->viewy > b) b = pl->viewtop + pl->viewy;
+        n++;
+    }
+    if (n == 0 || n == np) {   /* none here, or every player here: the game's own split */
+        s_ViewOn = 0;
+        return;
+    }
+    s_ViewL = l;
+    s_ViewT = t;
+    s_ViewW = r - l;
+    s_ViewH = b - t;
     s_ViewOn = 1;
 }
 

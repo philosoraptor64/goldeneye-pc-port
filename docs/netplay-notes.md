@@ -68,7 +68,7 @@ guest = player 2; the guest uses the host's EEPROM (in memory, its own
 | `GE_NET_DELAY`, `GE_NET_WAIT_SECS` (60), `GE_NET_DROP_SECS` (20) | |
 | `GE_NET_SIM_LATENCY/_JITTER` (ms), `GE_NET_SIM_LOSS` (%) | simulated bad link |
 | `GE_NET_TEST_DESYNC=<tick>` | perturbs the RNG (desync detection test) |
-| `GE_NET_VIEW=split` / `GE_NET_FULLVIEW=<player>` | full view off / forced |
+| `GE_NET_VIEW=split` / `GE_NET_FULLVIEW=<players>` (e.g. `2` or `1,2`) | full view off / forced to those players' views |
 
 iOS has no environment: the same lines go into `Documents/netplay.cfg`.
 
