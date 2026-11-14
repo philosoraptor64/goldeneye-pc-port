@@ -159,7 +159,9 @@ static int s_Offline = 0;       /* the other player left or went silent: play on
 static int s_PeerLeft = 0;
 static int s_Mismatch = 0;
 static int s_NumPlayers = 2;
-static int s_Local = 0;
+static int s_Local = 0;              /* this machine's first player */
+static unsigned s_LocalMask = 0;     /* this machine's players (0 until a session starts: just s_Local) */
+static int s_PadOf[4] = { 0, 0, 0, 0 };   /* its controller for each local player */
 static n64net_input *s_Net = NULL;
 static u64 s_Seed = 0;
 static int s_HaveSeed = 0;
@@ -660,8 +662,10 @@ static void startSession(void)
     {
         n64net_input_config cfg;
         memset(&cfg, 0, sizeof(cfg));
+        if (s_LocalMask == 0) s_LocalMask = 1u << s_Local;   /* stand-alone: one player per machine */
         cfg.num_players = s_NumPlayers;
         cfg.local_player = s_Local;
+        cfg.local_mask = s_LocalMask;
         cfg.session_id = (u32)(s_Seed ^ (s_Seed >> 32));
         cfg.input_delay = (s = envStr("GE_NET_DELAY")) ? (u32)atoi(s) : 2;
         s_BaseDelay = cfg.input_delay;
@@ -786,6 +790,13 @@ s32 genetInitExternal(const struct genetexternal *x)
     s_HostPaced = x->hostpaced != 0;
     s_Local = x->localplayer;
     s_IsHost = (s_Local == 0);
+    s_LocalMask = 0;
+    if (x->numplayers >= 2 && x->numplayers <= 4 && x->localmask != 0) {
+        s_NumPlayers = x->numplayers;
+        s_LocalMask = x->localmask & ((1u << s_NumPlayers) - 1);
+        for (int p = 0; p < 4; p++) s_PadOf[p] = x->padofplayer[p];
+        if (s_LocalMask) s_Local = __builtin_ctz(s_LocalMask);   /* this machine's first player */
+    }
     s_Seed = x->seed;
     s_HaveSeed = 1;
     if (!blobOk) {
@@ -936,13 +947,31 @@ static n64net_pad toNet(const OSContPad *p)
     return n;
 }
 
-/* This frame's pads for every player: lockstep (waits for the other player's input). */
+static void setLocalPads(u32 tick, const OSContPad *local)
+{
+    n64net_pad pads[N64NET_INPUT_MAX_PLAYERS];
+    memset(pads, 0, sizeof(pads));
+    for (int p = 0; p < s_NumPlayers; p++) {
+        if (s_LocalMask & (1u << p)) pads[p] = toNet(&local[s_PadOf[p] & 3]);
+    }
+    n64net_input_set_local_pads(s_Net, tick, pads);
+}
+
+static void copyLocalPads(const OSContPad *local, OSContPad *out)
+{
+    for (int p = 0; p < s_NumPlayers; p++) {
+        if (s_LocalMask & (1u << p)) out[p] = local[s_PadOf[p] & 3];
+    }
+}
+
+/* This frame's pads for every player: lockstep (waits for the other players' input).
+ * `local`: this machine's 4 controllers (index = its own controller number). */
 static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
 {
     if (s_Offline) {
         /* inputs the other player sent before leaving are still used, so both
          * machines play the same frames up to the moment it left */
-        n64net_input_set_local(s_Net, tick, toNet(local));
+        setLocalPads(tick, local);
         if (n64net_input_ready(s_Net, tick)) {
             for (int p = 0; p < s_NumPlayers; p++) {
                 n64net_pad n;
@@ -954,11 +983,11 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
             }
             return;
         }
-        out[s_Local] = *local;
+        copyLocalPads(local, out);
         return;
     }
     netPoll();
-    n64net_input_set_local(s_Net, tick, toNet(local));
+    setLocalPads(tick, local);
     if (!n64net_input_ready(s_Net, tick)) {
         unsigned long long start = gnt_now_us(), lastCheck = start;
         s_Stalls++;
@@ -972,7 +1001,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
                 if (peerGone()) {
                     s_StallUs += now - start;
                     goOffline();
-                    out[s_Local] = *local;
+                    copyLocalPads(local, out);
                     return;
                 }
             }
@@ -1249,18 +1278,18 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
 
     memset(pads, 0, sizeof(pads));
     if (s_Online) {
-        OSContPad local;
-        memset(&local, 0, sizeof(local));
-        if (scriptPad(tick, &local)) {
+        OSContPad local[4];   /* this machine's own controllers (its first is always its controller 1) */
+        memset(local, 0, sizeof(local));
+        if (scriptPad(tick, &local[0])) {
             /* scripted menus */
         } else if (s_BotMask && (long)tick >= s_BotFrom) {
-            botPad(tick, s_Local, &local);
+            botPad(tick, s_Local, &local[0]);
         } else if (s_BotMask) {
             /* bot not started yet: idle */
         } else {
-            joyPortLatestPad(0, &local); /* this machine's own controller is always its controller 1 */
+            for (int c = 0; c < 4; c++) joyPortLatestPad(c, &local[c]);
         }
-        exchangeTick(tick, &local, pads);
+        exchangeTick(tick, local, pads);
         endTick(tick, h);
     } else {
         for (int p = 0; p < MAXCONTROLLERS; p++) {
@@ -1320,7 +1349,7 @@ static void updateFullView(void)
         mode = (v && strcmp(v, "split") == 0) ? -1 : (forced ? 1 : 0);
     }
     np = (g_StageNum != 90 /* title / menus */) ? getPlayerCount() : 1;
-    mask = mode > 0 ? forced : (1 << s_Local);   /* later: every local player from i64's player table */
+    mask = mode > 0 ? forced : (int)(s_LocalMask ? s_LocalMask : (1u << s_Local));   /* this machine's players */
     if (mode < 0 || (mode == 0 && !s_Online) || np < 2) {
         s_ViewOn = 0;
         return;

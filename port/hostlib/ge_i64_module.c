@@ -58,6 +58,9 @@ struct genetexternal {
     int (*send)(const void *data, uint32_t size);
     int (*recv)(void *buf, uint32_t cap);
     int32_t hostpaced;
+    int32_t numplayers;
+    uint32_t localmask;
+    int32_t padofplayer[4];
 };
 extern struct genetexternal *g_geNetExternal;   /* main.c */
 extern uint32_t genetSessionBlob(void *out, uint32_t cap);
@@ -78,9 +81,11 @@ static const n64_game_info kInfo = {
     kRoms,
     1,
     GENET_BUILD_ID,
-    2,
+    4,  /* multiplayer: up to 4 players over up to 4 devices */
     60,
     N64_GAME_INFO_OWN_THREAD,
+    0,  /* drop-outs: "end the game" only for now ("remove the player" is planned) */
+    4,
 };
 
 /* survive the globals reset between runs (reentry.c) */
@@ -276,8 +281,8 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         return 1;
     }
     if (launch->mode == N64_LAUNCH_ONLINE &&
-        (!host->net_send || !host->net_recv || launch->local_player > 1)) {
-        snprintf(err, err_size, "online needs i64's game channel and 2 players");
+        (!host->net_send || !host->net_recv || launch->player_count < 2 || launch->player_count > 4)) {
+        snprintf(err, err_size, "online needs i64's game channel and 2-4 players");
         return 1;
     }
     if (!host->data_dir || !host->data_dir[0]) {
@@ -311,7 +316,14 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
     static struct genetexternal ext;   /* reset with the globals after the run */
     if (launch->mode == N64_LAUNCH_ONLINE) {
         memset(&ext, 0, sizeof(ext));
-        ext.localplayer = (int32_t)launch->local_player;
+        ext.localplayer = launch->local_machine == 0 ? 0 : 1;   /* genet: 0 = the session's host */
+        ext.numplayers = (int32_t)launch->player_count;
+        for (uint32_t p = 0; p < launch->player_count && p < 4; p++) {
+            if (launch->players[p].local) {
+                ext.localmask |= 1u << p;
+                ext.padofplayer[p] = launch->players[p].pad;
+            }
+        }
         ext.seed = launch->seed;
         ext.blob = launch->session_blob;
         ext.blobsize = launch->session_blob_size;

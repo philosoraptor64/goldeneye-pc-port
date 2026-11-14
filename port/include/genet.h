@@ -20,6 +20,10 @@ struct genetexternal {
     int (*send)(const void *data, u32 size);  /* game channel: unreliable datagrams */
     int (*recv)(void *buf, u32 cap);          /* one datagram: size, 0 if none */
     s32 hostpaced;              /* the host app calls the frames at 60 Hz: no own pacing */
+    /* i64's player table (ABI v2); numplayers 0 = two players, one per machine (localplayer) */
+    s32 numplayers;             /* 2-4 */
+    u32 localmask;              /* this machine's players (bit p) */
+    s32 padofplayer[4];         /* this machine's controller index for each local player */
 };
 enum { GENET_EXT_PEER_AWAY = 1, GENET_EXT_PEER_BACK = 2, GENET_EXT_PEER_LEFT = 3 }; /* = n64_net_event */
 u32 genetSessionBlob(void *out, u32 cap);   /* host, before every run; 0 = too small */
