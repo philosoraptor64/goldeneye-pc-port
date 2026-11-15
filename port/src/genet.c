@@ -548,6 +548,7 @@ static void netLogCb(const char *fmt, ...)
  * genetDropout; until then GE_TEST_DROPOUT=idle) retires each of its players through n64net at an agreed
  * tick on every machine (from then on the player stays, with nothing pressed). The host leaving, or no
  * one to decide, ends the match as before. */
+#define GENET_ACT_REMOVE 2   /* n64_dropout_action */
 #define GENET_ACT_IDLE 3
 #define GENET_DROPOUT_WAIT_US (120ull * 1000000ull)
 
@@ -556,7 +557,7 @@ static int retirePlayer(int p, int action)
     unsigned char act[2] = { (unsigned char)action, 0 };
     u32 apply = 0;
     if (!s_Net || !n64net_input_retire(s_Net, p, act, sizeof(act), &apply)) return 1;
-    netLog("player %d left: idle from tick %u", p + 1, (unsigned)apply);
+    netLog("player %d left: %s from tick %u", p + 1, action == GENET_ACT_REMOVE ? "removed" : "idle", (unsigned)apply);
     return 0;
 }
 
@@ -585,14 +586,35 @@ static void machineLeft(int m)
         if (!s_DropoutMenu) s_PeerLeft = 1;                /* no one to decide: the match ends */
         return;
     }
-    for (int p = 0; p < s_NumPlayers; p++) {
-        if (s_MachineOf[p] == m) retirePlayer(p, GENET_ACT_IDLE);
+    {
+        const int act = !strcmp(t, "remove") ? GENET_ACT_REMOVE : GENET_ACT_IDLE;   /* GE_TEST_DROPOUT=idle|remove */
+        for (int p = 0; p < s_NumPlayers; p++) {
+            if (s_MachineOf[p] == m) retirePlayer(p, act);
+        }
     }
+}
+
+/* Removed players (N64_DROPOUT_REMOVE): from the agreed tick on, the game kills the player once (no
+ * points either way: bondviewKillCurrentPlayer, not the damage path) and it never respawns (respawning
+ * needs a button, and a player who left presses none). Dead, it has no collision, the radar skips it and
+ * its body fades out. Asked by the game for the player it is updating (bondview2.c maybe_mp_interface),
+ * on every machine for the same simulated tick, rollbacks included: deterministic. */
+s32 genetPlayerRemoved(s32 player)
+{
+    unsigned char act[8];
+    u32 last = 0, apply = 0, size = sizeof(act);
+    const u32 tick = s_Resim ? s_ResimTick - 1 : s_Tick - 1;   /* the tick being simulated */
+    if (!s_Net || player < 0 || player >= s_NumPlayers) return 0;
+    if (!n64net_input_retired(s_Net, player, &last, &apply, act, &size) || size < 1 || act[0] != GENET_ACT_REMOVE) return 0;
+    if (tick < apply) return 0;
+    if (!s_Resim) netLog("player %d removed at tick %u (the game takes it out)", player + 1, (unsigned)tick);
+    return 1;
 }
 
 s32 genetDropout(s32 player, s32 action)
 {
-    if (!s_Online || !s_IsHost || player < 0 || player >= s_NumPlayers || action != GENET_ACT_IDLE) return 1;
+    if (!s_Online || !s_IsHost || player < 0 || player >= s_NumPlayers) return 1;
+    if (action != GENET_ACT_IDLE && action != GENET_ACT_REMOVE) return 1;
     return retirePlayer(player, action);
 }
 

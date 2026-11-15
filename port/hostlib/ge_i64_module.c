@@ -91,7 +91,7 @@ static const n64_game_info kInfo = {
     4,  /* multiplayer: up to 4 players over up to 4 devices */
     60,
     N64_GAME_INFO_OWN_THREAD,
-    N64_DROPOUT_CAN_IDLE,   /* drop-outs: the player stays, with no input ("remove" is planned) */
+    N64_DROPOUT_CAN_REMOVE | N64_DROPOUT_CAN_IDLE,   /* drop-outs: the player is removed (dies, stays down) or stays, with no input */
     4,
 };
 

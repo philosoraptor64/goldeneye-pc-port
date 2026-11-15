@@ -9301,6 +9301,17 @@ Gfx *maybe_mp_interface(Gfx *gdl)
     s32 i;
     s32 total;
 
+#ifdef PORT
+    /* Netplay (port/src/genet.c): a player who left and was removed dies once and stays down */
+    {
+        extern s32 genetPlayerRemoved(s32 player);
+        if (getPlayerCount() > 1 && !g_CurrentPlayer->bonddead && genetPlayerRemoved(get_cur_playernum()))
+        {
+            bondviewKillCurrentPlayer();
+        }
+    }
+#endif
+
     if (g_CurrentPlayer->cameramode == 1)
     {
         bondviewIntroCameraTextTick();

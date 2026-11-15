@@ -32,7 +32,8 @@ u32 genetSessionBlob(void *out, u32 cap);   /* host, before every run; 0 = too s
 s32 genetInitExternal(const struct genetexternal *x);   /* at game start instead of genetConnect; 0 or -1 */
 void genetExternalEvent(s32 event);         /* the host app's session events */
 void genetExternalEventFrom(s32 event, s32 machine);   /* the same with the machine (-1 = unknown) */
-s32 genetDropout(s32 player, s32 action);   /* session host: 3 = the player stays idle; 0 = done */
+s32 genetDropout(s32 player, s32 action);   /* session host: 2 = removed, 3 = the player stays idle; 0 = done */
+s32 genetPlayerRemoved(s32 player);         /* the game: this player left and was removed (dies, stays down) */
 const char *genetEndReason(void);           /* in a host app: why the match ends (desync, friend gone); "" = it doesn't */
 s32 genetHostPaced(void);
 
