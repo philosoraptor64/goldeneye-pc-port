@@ -10,6 +10,7 @@
 #        GUEST_LATE=<secs> (start the guest later); KILL_GUEST=<secs> (kill it: the host must play on);
 #        HOST_ENV/GUEST_ENV="VAR=value ..." (extra settings for one side, e.g. HOST_ENV="GE_NET_SCRIPT=...");
 #        MENUS=1: no shortcut -- the host walks title -> Multiplayer -> Start by script, bots from tick 800;
+#        AUDIO=1: open the audio device (default: SDL dummy driver);
 #        GUEST_SET="Video.FovScale=150 Window.Width=800" (the guest runs from its own folder with these
 #        settings changed in a copy of data/ge007.ini: online play must not depend on local settings)
 set -uo pipefail
@@ -20,10 +21,12 @@ bin=$(ls ${BUILD:-build-pc}/ge007*.aarch64 ${BUILD:-build-pc}/ge007*.x86_64 2>/d
 [ -x "$bin" ] || { echo "build first (build-pc)"; exit 1; }
 FRAMES=${FRAMES:-3600}
 MP=${MP-2,1}
-out=build-pc/net-test/$(date +%Y%m%d-%H%M%S); mkdir -p "$out"
+out=$root/build-pc/net-test/$(date +%Y%m%d-%H%M%S); mkdir -p "$out"   # absolute: the game may change directory
 
+# no audio device unless AUDIO=1 (two copies opening the device can hang at start-up)
 common=(GE_NET_BOT=1 GE_NET_FRAMES=$FRAMES GE_NET_DELAY=${DELAY:-2}
         GE_NET_SIM_LATENCY=${LATENCY:-0} GE_NET_SIM_JITTER=${JITTER:-0} GE_NET_SIM_LOSS=${LOSS:-0})
+[ "${AUDIO:-0}" = 1 ] || common+=(SDL_AUDIODRIVER=dummy)
 if [ "${MENUS:-0}" = 1 ]; then
     MP=
     sc=""; for t in $(seq 60 60 540); do sc="$sc$t:START;"; done
@@ -46,7 +49,7 @@ fi
 
 guestdir=$PWD
 if [ -n "${GUEST_SET:-}" ]; then
-    guestdir=$PWD/$out/guestroot; mkdir -p "$guestdir/data"
+    guestdir=$out/guestroot; mkdir -p "$guestdir/data"
     for f in data/*; do [ "$(basename "$f")" = ge007.ini ] || ln -s "$PWD/$f" "$guestdir/data/"; done
     python3 - "$PWD/data/ge007.ini" "$guestdir/data/ge007.ini" $GUEST_SET <<'PY'
 import sys, re
@@ -70,8 +73,8 @@ fi
 env "${common[@]}" "${hostnet[@]}" ${HOST_ENV:-} GE_NET_HASHLOG="$out/host.hash" "$bin" > "$out/host.log" 2>&1 &
 hpid=$!
 sleep "${GUEST_LATE:-1}"
-(cd "$guestdir" && env "${common[@]}" "${guestnet[@]}" ${GUEST_ENV:-} GE_NET_HASHLOG="$OLDPWD/$out/guest.hash" \
-    ${DESYNC_TEST:+GE_NET_TEST_DESYNC=$DESYNC_TEST} "$OLDPWD/$bin" > "$OLDPWD/$out/guest.log" 2>&1) &
+(cd "$guestdir" && env "${common[@]}" "${guestnet[@]}" ${GUEST_ENV:-} GE_NET_HASHLOG="$out/guest.hash" \
+    ${DESYNC_TEST:+GE_NET_TEST_DESYNC=$DESYNC_TEST} "$root/$bin" > "$out/guest.log" 2>&1) &
 gpid=$!
 trap 'kill $hpid $gpid $spid 2>/dev/null' INT TERM
 if [ -n "${KILL_GUEST:-}" ]; then

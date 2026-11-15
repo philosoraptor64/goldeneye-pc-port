@@ -736,12 +736,16 @@ if(APPLE)
   # quoting the whole "cc -E -I..." as ONE string works on Windows (cmd
   # parses the command line) but /bin/sh on macOS/Linux treats the entire
   # string as a single filename ("No such file or directory").
+  # (a plain list, not a generator expression: with VERBATIM an empty one became a "" argument,
+  # which GCC reads as a missing input file: "linker input file not found")
+  if(GE_COMPACT_WINDOW)
+    list(APPEND _dram_syms_pp_def "-DPORT_COMPACT_WINDOW=1")
+  endif()
   add_custom_command(
     OUTPUT "${SRC_DRAM_SYMS_EXPANDED}"
     COMMAND "${CMAKE_C_COMPILER}" "-E"
             "-I${CMAKE_SOURCE_DIR}/port/include"
             "-DPORT_ADDR_BASE=${PORT_ADDR_BASE}"
-            $<$<BOOL:${GE_COMPACT_WINDOW}>:-DPORT_COMPACT_WINDOW=1>
             ${_dram_syms_pp_def}
             "${SRC_DRAM_SYMS_INPUT}"
             "-o" "${SRC_DRAM_SYMS_EXPANDED}"
