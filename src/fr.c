@@ -799,17 +799,42 @@ Gfx *viSetupScreensForNumPlayers(Gfx *gdl)
     gDPSetCycleType(gdl++, G_CYC_FILL);
     gDPSetScissor(gdl++, G_SC_NON_INTERLACE, 0, 0, viGetX(), viGetY());
     gDPSetFillColor(gdl++, ((GPACK_RGBA5551(0,0,0,1) << 16) | GPACK_RGBA5551(0,0,0,1)));
+#ifdef PORT
+    /* Netplay redraw views (port/src/genet.c): this machine's own layout -- the borders come with the
+     * first player it draws, for the number of players it has */
+    extern s32 genetViewLayout(s32 slot, s32 *count, s32 *index);
+    extern s32 genetDrawsSlot(s32 slot);
+    s32 viewCount = getPlayerCount(), viewIdx, firstDrawn = get_player_position_in_shuffled(get_cur_playernum()) == 0;
+    if (genetViewLayout(get_cur_playernum(), &viewCount, &viewIdx))
+    {
+        s32 i;
+        firstDrawn = 0;
+        for (i = 0; i < getPlayerCount(); i++)
+        {
+            if (genetDrawsSlot(get_nth_player_from_shuffled(i)))
+            {
+                firstDrawn = get_nth_player_from_shuffled(i) == get_cur_playernum();
+                break;
+            }
+        }
+    }
+#define FR_VIEW_COUNT() viewCount
+#define FR_FIRST_DRAWN() firstDrawn
+#else
+#define FR_VIEW_COUNT() getPlayerCount()
+#define FR_FIRST_DRAWN() (get_player_position_in_shuffled(get_cur_playernum()) == 0)
+#endif
 
     if (viGetViewTop() > 0)
     {
-        if (get_player_position_in_shuffled(get_cur_playernum()) == 0)
+        if (FR_FIRST_DRAWN())
         {
             gDPFillRectangle(gdl++, 0, 0, (viGetX() - 1), (viGetViewTop() - 1));
             gDPPipeSync(gdl++);
         }
     }
 
-    if (getPlayerCount() == 1)
+    if (FR_VIEW_COUNT() == 1)
     {
         if ((viGetViewTop() + viGetViewHeight()) < viGetY())
         {
@@ -819,7 +844,7 @@ Gfx *viSetupScreensForNumPlayers(Gfx *gdl)
     }
     else
     {
-        if (get_player_position_in_shuffled(get_cur_playernum()) == 0)
+        if (FR_FIRST_DRAWN())
         {
             if ((viGetViewTop() + viGetViewHeight() + viGetViewHeight()) < viGetY())
             {
@@ -830,13 +855,13 @@ Gfx *viSetupScreensForNumPlayers(Gfx *gdl)
             gDPFillRectangle(gdl++, 0, ((SCREEN_HEIGHT / 2) - 1), (viGetX() - 1), (SCREEN_HEIGHT / 2));
             gDPPipeSync(gdl++);
 
-            if (getPlayerCount() >= 3)
+            if (FR_VIEW_COUNT() >= 3)
             {
                 gDPFillRectangle(gdl++, ((SCREEN_WIDTH / 2) - 1), 0, (SCREEN_WIDTH / 2), (viGetY() - 1));
                 gDPPipeSync(gdl++);
             }
 
-            if (getPlayerCount() == 3)
+            if (FR_VIEW_COUNT() == 3)
             {
                 gDPFillRectangle(gdl++, ((SCREEN_WIDTH / 2) + 1), ((SCREEN_HEIGHT / 2) + 1), (viGetX() - 1), (viGetY() - 1));
                 gDPPipeSync(gdl++);
@@ -845,6 +870,8 @@ Gfx *viSetupScreensForNumPlayers(Gfx *gdl)
     }
 
     return gdl;
+#undef FR_VIEW_COUNT
+#undef FR_FIRST_DRAWN
 }
 
 void viSet800232A0(s32 arg0)

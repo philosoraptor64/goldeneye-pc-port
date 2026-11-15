@@ -805,6 +805,12 @@ Gfx* lvlRender(Gfx* DL)
 
         for(i = 0; i < pcount; i++)
         {
+#ifdef PORT
+            /* Netplay redraw views (port/src/genet.c): every player is simulated here, but only this
+             * machine's players are drawn; the others' display lists are thrown away (as PD does) */
+            extern s32 genetDrawsSlot(s32 slot);
+            Gfx *savedDL = DL;
+#endif
             set_cur_player(get_nth_player_from_shuffled(i));
 
             viSetViewSize(g_CurrentPlayer->viewx, g_CurrentPlayer->viewy);
@@ -936,6 +942,12 @@ Gfx* lvlRender(Gfx* DL)
             }
 
             DL = mp_watch_menu_display(DL);
+#ifdef PORT
+            if (!genetDrawsSlot(get_cur_playernum()))
+            {
+                DL = savedDL;
+            }
+#endif
         }
     }
 

@@ -483,11 +483,13 @@ static void sendSave(u8 kind, int chunk)
     }
 }
 
+enum { VIEW_REDRAW = 0, VIEW_ZOOM = 1, VIEW_SPLIT = 2 };   /* GE_NET_VIEW, see viewMode */
+static int viewMode(void);
 static void layoutSlots(void)
 {
     int i, m, n = s_NumPlayers, diagonal = 0;
     for (i = 0; i < 4; i++) s_SlotOf[i] = s_PlayerOfSlot[i] = i;
-    if (n < 3) return;
+    if (n < 3 || viewMode() != VIEW_ZOOM) return;   /* redraw lays views out per machine: no need */
     /* the game's split: 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right; pairs (1,4) and (2,3) are diagonal */
     if (s_MachineOf[1] == s_MachineOf[2]) diagonal = 1;
     if (n == 4 && s_MachineOf[0] == s_MachineOf[3]) diagonal = 1;
@@ -1486,6 +1488,51 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     return idx;
 }
 
+/* How a machine shows a split-screen match online (GE_NET_VIEW):
+ *   redraw (default): every player's view is laid out as on its own machine -- a machine with one player
+ *     gets the full screen, one with k players the game's own k-player split for them -- and each machine
+ *     draws only its own players (the others' display lists are thrown away). The layout comes from the
+ *     session table, so every machine simulates the same views (view size feeds aiming).
+ *   zoom: the game's split as usual, cropped to this machine's views (gfx_pc.cpp), slots laid out so a
+ *     machine's two players sit side by side;  split: the plain split screen. */
+static int viewMode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *v = envStr("GE_NET_VIEW");
+        mode = (v && strcmp(v, "zoom") == 0) ? VIEW_ZOOM : (v && strcmp(v, "split") == 0) ? VIEW_SPLIT : VIEW_REDRAW;
+    }
+    return mode;
+}
+
+/* redraw mode: game slot `slot`'s view layout -- how many players its machine has (*count) and which of
+ * them it is (*index). 0 = not in redraw mode (the game's own split). */
+s32 genetViewLayout(s32 slot, s32 *count, s32 *index)
+{
+    int m, p, k = 0, idx = 0, q;
+    if (!s_Online || viewMode() != VIEW_REDRAW || slot < 0 || slot >= s_NumPlayers || s_NumPlayers < 2) return 0;
+    if (g_StageNum == 90 /* title / menus */) return 0;
+    p = s_PlayerOfSlot[slot];
+    m = s_MachineOf[p];
+    for (q = 0; q < s_NumPlayers; q++) {   /* this machine's players in slot order */
+        const int pq = s_PlayerOfSlot[q];
+        if (s_MachineOf[pq] != m) continue;
+        if (q == slot) idx = k;
+        k++;
+    }
+    *count = k;
+    *index = idx;
+    return 1;
+}
+
+/* redraw mode: whether this machine draws game slot `slot` (one of its own players). 1 when not in redraw mode. */
+s32 genetDrawsSlot(s32 slot)
+{
+    s32 k, i;
+    if (!genetViewLayout(slot, &k, &i)) return 1;
+    return (s_LocalMask & (1u << s_PlayerOfSlot[slot])) != 0;
+}
+
 /* Netplay views (port/fast3d/gfx_pc.cpp): online, in a split-screen match,
  * this machine shows only its own players' views, zoomed to the window. The
  * game's split stays as it is on every machine (the viewports feed aiming, so
@@ -1509,6 +1556,7 @@ static void updateFullView(void)
             if (*q >= '1' && *q <= '4') forced |= 1 << (*q - '1');
         }
         mode = (v && strcmp(v, "split") == 0) ? -1 : (forced ? 1 : 0);
+        if (mode == 0 && viewMode() != VIEW_ZOOM) mode = -1;   /* redraw (default): the game lays the views out */
     }
     np = (g_StageNum != 90 /* title / menus */) ? getPlayerCount() : 1;
     mask = mode > 0 ? forced : (int)(s_LocalMask ? s_LocalMask : (1u << s_Local));   /* this machine's players */

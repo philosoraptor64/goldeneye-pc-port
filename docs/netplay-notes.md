@@ -79,9 +79,13 @@ iOS has no environment: the same lines go into `Documents/netplay.cfg`.
   distance 400, no native widescreen and an 800x600 window stays identical
   (upstream's gameplay-visibility layer, D466). F10 edits during a match are
   not synced (avoid them online).
-- Full view: in an online 2-4 player match each machine shows only its own
-  player's view, scaled uniformly to the window (gfx_pc.cpp canvas offset +
-  scissor clip; the game still draws all views).
+- Views online (`GE_NET_VIEW`, genet.c `viewMode`): **redraw** (default, 2026-11-15): every player's
+  viewport is laid out as on its own machine (`genetViewLayout`: a machine with one player gets the
+  full screen, one with k players the game's own k-player split for them), so every machine simulates
+  the same views (view size feeds aiming); lv.c's render loop still runs for every player but keeps
+  only this machine's display lists (PD's method), fr.c's borders follow the machine's own layout.
+  `zoom` = the old crop of the game's split (gfx_pc.cpp canvas offset + scissor; slots laid out so a
+  machine's two players sit side by side); `split` = the plain split screen.
 - A silent peer for 20 s or a BYE = play on offline (inputs it already sent are
   still used). An iPhone switching apps is different: the game holds at a
   frame boundary and tells the other player it is away (n64net AWAY); the

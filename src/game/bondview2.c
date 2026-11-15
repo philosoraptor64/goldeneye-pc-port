@@ -7906,9 +7906,30 @@ s16 getHeight330or240(void)
     return SCREEN_HEIGHT;
 }
 
+#ifdef PORT
+/* Netplay (port/src/genet.c, redraw views): a player's view is laid out as on its own machine --
+ * the count and index of that machine's players instead of the match's. */
+extern s32 genetViewLayout(s32 slot, s32 *count, s32 *index);
+static s32 viewPlayerCount(void)
+{
+    s32 k, i;
+    return genetViewLayout(get_cur_playernum(), &k, &i) ? k : getPlayerCount();
+}
+static s32 viewPlayerNum(void)
+{
+    s32 k, i;
+    return genetViewLayout(get_cur_playernum(), &k, &i) ? i : get_cur_playernum();
+}
+#define VIEW_PLAYER_COUNT() viewPlayerCount()
+#define VIEW_PLAYER_NUM() viewPlayerNum()
+#else
+#define VIEW_PLAYER_COUNT() getPlayerCount()
+#define VIEW_PLAYER_NUM() get_cur_playernum()
+#endif
+
 s16 bondviewGetCurrentPlayerViewportWidth(void)
 {
-    if (getPlayerCount() >= 3)
+    if (VIEW_PLAYER_COUNT() >= 3)
     {
         return VIEWPORT_WIDTH_4P;
     }
@@ -7933,9 +7954,9 @@ s16 bondviewGetCurrentPlayerViewportWidth(void)
 
 s16 get_curplayer_viewport_ulx(void)
 {
-    if (2 < getPlayerCount())
+    if (2 < VIEW_PLAYER_COUNT())
     {
-        if ((get_cur_playernum() == 1) || (get_cur_playernum() == 3))
+        if ((VIEW_PLAYER_NUM() == 1) || (VIEW_PLAYER_NUM() == 3))
         {
                 return 0xa1;
         }
@@ -7954,7 +7975,7 @@ s16 bondviewGetCurrentPlayerViewportHeight(void)
 {
     f32 t;
 
-    if (getPlayerCount() >= 2)
+    if (VIEW_PLAYER_COUNT() >= 2)
     {
         return VIEWPORT_HEIGHT_4P;
     }
@@ -8000,9 +8021,9 @@ s16 bondviewGetCurrentPlayerViewportUly(void)
 {
     f32 t;
 
-    if (getPlayerCount() == 2)
+    if (VIEW_PLAYER_COUNT() == 2)
     {
-        if (get_cur_playernum() == 0)
+        if (VIEW_PLAYER_NUM() == 0)
         {
 #ifdef VERSION_EU
             return 0;
@@ -8014,9 +8035,9 @@ s16 bondviewGetCurrentPlayerViewportUly(void)
         return VIEWPORT_ULY_2P_PLAYER_2;
     }
 
-    if (getPlayerCount() >= 3)
+    if (VIEW_PLAYER_COUNT() >= 3)
     {
-        if (get_cur_playernum() < 2)
+        if (VIEW_PLAYER_NUM() < 2)
         {
 #ifdef VERSION_EU
             return 0;
