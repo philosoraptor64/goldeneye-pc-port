@@ -157,6 +157,13 @@ static int s_Online = 0;        /* a session was set up (connect succeeded) */
 static int s_IsHost = 0;
 static int s_Offline = 0;       /* the other player left or went silent: play on alone */
 static int s_PeerLeft = 0;
+/* ---- drop-outs: see machineLeft ---- */
+static int s_MachineOf[4] = { 0, 1, 2, 3 };
+static unsigned s_LeftMachines = 0;
+static unsigned long long s_LeftAtUs = 0;
+static int s_DropoutMenu = 0;
+static void machineLeft(int m);
+static int otherMachine(void);
 static int s_Mismatch = 0;
 static int s_NumPlayers = 2;
 static int s_Local = 0;              /* this machine's first player */
@@ -494,7 +501,8 @@ static int netPoll(void)
             const int same = memcmp(buf + 5, GENET_BUILD_ID, 12) == 0;
             if (buf[4] == HS_BYE) {
                 if (!s_PeerLeft && s_Online) netLog("the other player quit");
-                s_PeerLeft = 1;
+                if (s_ExtSend && s_Net && otherMachine() >= 0) machineLeft(otherMachine());   /* drop-outs */
+                else if (!s_ExtSend || !s_LeftMachines) s_PeerLeft = 1;
             } else if (s_IsHost && buf[4] == HS_HELLO) {
                 if (!s_ExtSend) gnt_accept_last();   /* own socket: learn the guest's address */
                 if (!same) {
@@ -536,12 +544,90 @@ static void netLogCb(const char *fmt, ...)
     netLog("%s", buf);
 }
 
+/* A machine leaving doesn't end the match when someone can decide: the session's host (i64's menu ->
+ * genetDropout; until then GE_TEST_DROPOUT=idle) retires each of its players through n64net at an agreed
+ * tick on every machine (from then on the player stays, with nothing pressed). The host leaving, or no
+ * one to decide, ends the match as before. */
+#define GENET_ACT_IDLE 3
+#define GENET_DROPOUT_WAIT_US (120ull * 1000000ull)
+
+static int retirePlayer(int p, int action)
+{
+    unsigned char act[2] = { (unsigned char)action, 0 };
+    u32 apply = 0;
+    if (!s_Net || !n64net_input_retire(s_Net, p, act, sizeof(act), &apply)) return 1;
+    netLog("player %d left: idle from tick %u", p + 1, (unsigned)apply);
+    return 0;
+}
+
+static int otherMachine(void)
+{
+    int me = -1, other = -1;
+    for (int p = 0; p < s_NumPlayers; p++) if (s_LocalMask & (1u << p)) me = s_MachineOf[p];
+    for (int p = 0; p < s_NumPlayers; p++) {
+        if (s_MachineOf[p] == me) continue;
+        if (other >= 0 && s_MachineOf[p] != other) return -1;   /* more than two machines */
+        other = s_MachineOf[p];
+    }
+    return other;
+}
+
+static void machineLeft(int m)
+{
+    if (m < 0 || m > 3 || (s_LeftMachines & (1u << m))) return;
+    s_LeftMachines |= 1u << m;
+    if (!s_LeftAtUs) s_LeftAtUs = gnt_now_us();
+    netLog("machine %d left", m + 1);
+    if (m == 0 && !s_IsHost) { s_PeerLeft = 1; return; }   /* the host left: the match ends */
+    if (!s_IsHost) return;                                 /* the host decides */
+    const char *t = envStr("GE_TEST_DROPOUT");
+    if (!t) {
+        if (!s_DropoutMenu) s_PeerLeft = 1;                /* no one to decide: the match ends */
+        return;
+    }
+    for (int p = 0; p < s_NumPlayers; p++) {
+        if (s_MachineOf[p] == m) retirePlayer(p, GENET_ACT_IDLE);
+    }
+}
+
+s32 genetDropout(s32 player, s32 action)
+{
+    if (!s_Online || !s_IsHost || player < 0 || player >= s_NumPlayers || action != GENET_ACT_IDLE) return 1;
+    return retirePlayer(player, action);
+}
+
+void genetExternalEventFrom(s32 event, s32 machine)
+{
+    if (event == GENET_EXT_PEER_LEFT && machine >= 0) {
+        machineLeft(machine);
+        return;
+    }
+    genetExternalEvent(event);
+}
+
 static int peerGone(void)
 {
     if (s_PeerLeft) return 1;
+    if (s_LeftMachines) {
+        /* someone left: fine once the host decided (nothing to wait for), else wait for its decision */
+        if (n64net_input_remote_players(s_Net) == 0) return 0;
+        return gnt_now_us() - s_LeftAtUs > GENET_DROPOUT_WAIT_US;
+    }
     if (s_ExtPeerAway) return 0;   /* i64 says the other player's app is in the background */
     if (n64net_input_peer_away(s_Net)) return 0; /* its app is in the background: wait as long as it takes */
-    return n64net_input_peer_silence_usecs(s_Net) > (unsigned long long)s_DropSecs * 1000000ull;
+    if (n64net_input_peer_silence_usecs(s_Net) > (unsigned long long)s_DropSecs * 1000000ull) {
+        /* silent too long: on the host, the machines whose players we wait for have left */
+        if (s_IsHost && s_ExtSend) {
+            for (int p = 0; p < s_NumPlayers; p++) {
+                n64net_pad n;
+                if (!(s_LocalMask & (1u << p)) && n64net_input_get(s_Net, p, n64net_input_confirmed_tick(s_Net) + 1, &n))
+                    machineLeft(s_MachineOf[p]);
+            }
+            if (s_LeftMachines && !s_PeerLeft) return peerGone();
+        }
+        return 1;
+    }
+    return 0;
 }
 
 static void goOffline(void)
@@ -791,7 +877,11 @@ s32 genetInitExternal(const struct genetexternal *x)
     s_Local = x->localplayer;
     s_IsHost = (s_Local == 0);
     s_LocalMask = 0;
+    s_LeftMachines = 0;
+    s_LeftAtUs = 0;
+    s_DropoutMenu = x->dropoutmenu;
     if (x->numplayers >= 2 && x->numplayers <= 4 && x->localmask != 0) {
+        for (int p = 0; p < 4; p++) s_MachineOf[p] = x->machineofplayer[p];
         s_NumPlayers = x->numplayers;
         s_LocalMask = x->localmask & ((1u << s_NumPlayers) - 1);
         for (int p = 0; p < 4; p++) s_PadOf[p] = x->padofplayer[p];

@@ -61,10 +61,17 @@ struct genetexternal {
     int32_t numplayers;
     uint32_t localmask;
     int32_t padofplayer[4];
+    int32_t machineofplayer[4];
+    int32_t dropoutmenu;
 };
 extern struct genetexternal *g_geNetExternal;   /* main.c */
 extern uint32_t genetSessionBlob(void *out, uint32_t cap);
 extern void genetExternalEvent(int32_t event);
+extern void genetExternalEventFrom(int32_t event, int32_t machine);
+extern int32_t genetDropout(int32_t player, int32_t action);
+#ifndef N64_LAUNCH_DROPOUT_MENU
+#define N64_LAUNCH_DROPOUT_MENU (1u << 1)   /* proposed: i64 shows the host a drop-out menu */
+#endif
 extern const char *genetEndReason(void);
 
 /* Bump when the converter's output changes: older imports are redone. */
@@ -84,7 +91,7 @@ static const n64_game_info kInfo = {
     4,  /* multiplayer: up to 4 players over up to 4 devices */
     60,
     N64_GAME_INFO_OWN_THREAD,
-    0,  /* drop-outs: "end the game" only for now ("remove the player" is planned) */
+    N64_DROPOUT_CAN_IDLE,   /* drop-outs: the player stays, with no input ("remove" is planned) */
     4,
 };
 
@@ -318,7 +325,9 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         memset(&ext, 0, sizeof(ext));
         ext.localplayer = launch->local_machine == 0 ? 0 : 1;   /* genet: 0 = the session's host */
         ext.numplayers = (int32_t)launch->player_count;
+        ext.dropoutmenu = (launch->flags & N64_LAUNCH_DROPOUT_MENU) != 0;
         for (uint32_t p = 0; p < launch->player_count && p < 4; p++) {
+            ext.machineofplayer[p] = launch->players[p].machine;
             if (launch->players[p].local) {
                 ext.localmask |= 1u << p;
                 ext.padofplayer[p] = launch->players[p].pad;
@@ -350,14 +359,28 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
 }
 
 
+/* drop-outs (the session's host): the player stays idle (multiplayer has no CPU players) */
+N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_action action, const uint32_t *selection,
+                                     uint32_t selection_count)
+{
+    (void)selection;
+    (void)selection_count;
+    return genetDropout((int32_t)player, (int32_t)action);
+}
+
 N64_GAME_EXPORT n64_frame_result n64_game_frame(void)
 {
     if (!sRunning) return N64_GAME_FRAME_EXIT;
     if (previewDue(++sPreviewFrames) && gPortFrameCaptureCallback) gPortFrameCaptureRequest = 1;
-    if (sHost && sHost->net_poll_event) {
+    if (sHost && sHost->abi_version >= 2 && sHost->net_poll_event_from) {
+        uint32_t m = 0;
+        int ev;
+        while ((ev = sHost->net_poll_event_from(&m)) != 0)
+            genetExternalEventFrom(ev, (int32_t)m);   /* same numbers: GENET_EXT_* = n64_net_event */
+    } else if (sHost && sHost->net_poll_event) {
         int ev;
         while ((ev = sHost->net_poll_event()) != 0)
-            genetExternalEvent(ev);   /* same numbers: GENET_EXT_* = n64_net_event */
+            genetExternalEvent(ev);
     }
     if (genetEndReason()[0]) return N64_GAME_FRAME_EXIT;   /* a desync or the friend gone: i64 shows why */
     return geModuleFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
