@@ -169,6 +169,11 @@ static int s_NumPlayers = 2;
 static int s_Local = 0;              /* this machine's first player */
 static unsigned s_LocalMask = 0;     /* this machine's players (0 until a session starts: just s_Local) */
 static int s_PadOf[4] = { 0, 0, 0, 0 };   /* its controller for each local player */
+/* The game's player slot (view) for each session player and back. A machine with two players gets a row or
+ * a column of the 4-way split (never a diagonal pair), so its picture is one half with only its own views.
+ * Every machine computes it from the same table. Identity unless a machine's players would sit diagonally. */
+static int s_SlotOf[4] = { 0, 1, 2, 3 };
+static int s_PlayerOfSlot[4] = { 0, 1, 2, 3 };
 static n64net_input *s_Net = NULL;
 static u64 s_Seed = 0;
 static int s_HaveSeed = 0;
@@ -478,6 +483,48 @@ static void sendSave(u8 kind, int chunk)
     }
 }
 
+static void layoutSlots(void)
+{
+    int i, m, n = s_NumPlayers, diagonal = 0;
+    for (i = 0; i < 4; i++) s_SlotOf[i] = s_PlayerOfSlot[i] = i;
+    if (n < 3) return;
+    /* the game's split: 1 top-left, 2 top-right, 3 bottom-left, 4 bottom-right; pairs (1,4) and (2,3) are diagonal */
+    if (s_MachineOf[1] == s_MachineOf[2]) diagonal = 1;
+    if (n == 4 && s_MachineOf[0] == s_MachineOf[3]) diagonal = 1;
+    if (!diagonal) return;
+    {
+        static const int pairs[4][2] = { { 0, 1 }, { 2, 3 }, { 0, 2 }, { 1, 3 } };
+        int used = 0;
+        for (i = 0; i < 4; i++) s_SlotOf[i] = -1;
+        /* machines with exactly two players first, each to the first free row/column */
+        for (m = 0; m < 4; m++) {
+            int pl[4], k = 0, j;
+            for (i = 0; i < n; i++) if (s_MachineOf[i] == m) pl[k++] = i;
+            if (k != 2) continue;
+            for (j = 0; j < 4; j++) {
+                const int a = pairs[j][0], b = pairs[j][1];
+                if (a < n && b < n && !(used & (1 << a)) && !(used & (1 << b))) {
+                    s_SlotOf[pl[0]] = a, s_SlotOf[pl[1]] = b;
+                    used |= (1 << a) | (1 << b);
+                    break;
+                }
+            }
+        }
+        /* everyone else in order, to the free slots */
+        for (i = 0; i < n; i++) {
+            int q;
+            if (s_SlotOf[i] >= 0) continue;
+            for (q = 0; q < n && (used & (1 << q)); q++) {}
+            s_SlotOf[i] = q;
+            used |= 1 << q;
+        }
+        for (i = n; i < 4; i++) s_SlotOf[i] = i;
+        for (i = 0; i < 4; i++) s_PlayerOfSlot[s_SlotOf[i]] = i;
+    }
+    netLog("player slots: %d %d %d %d (each machine's players side by side)", s_SlotOf[0] + 1, s_SlotOf[1] + 1,
+           s_SlotOf[2] + 1, s_SlotOf[3] + 1);
+}
+
 /* Reads every waiting datagram. Returns 1 once the other machine is known to be in the session. */
 static int netPoll(void)
 {
@@ -605,6 +652,7 @@ s32 genetPlayerRemoved(s32 player)
     u32 last = 0, apply = 0, size = sizeof(act);
     const u32 tick = s_Resim ? s_ResimTick - 1 : s_Tick - 1;   /* the tick being simulated */
     if (!s_Net || player < 0 || player >= s_NumPlayers) return 0;
+    player = s_PlayerOfSlot[player];   /* the game's slot -> the session's player */
     if (!n64net_input_retired(s_Net, player, &last, &apply, act, &size) || size < 1 || act[0] != GENET_ACT_REMOVE) return 0;
     if (tick < apply) return 0;
     if (!s_Resim) netLog("player %d removed at tick %u (the game takes it out)", player + 1, (unsigned)tick);
@@ -909,6 +957,7 @@ s32 genetInitExternal(const struct genetexternal *x)
         for (int p = 0; p < 4; p++) s_PadOf[p] = x->padofplayer[p];
         if (s_LocalMask) s_Local = __builtin_ctz(s_LocalMask);   /* this machine's first player */
     }
+    layoutSlots();
     s_Seed = x->seed;
     s_HaveSeed = 1;
     if (!blobOk) {
@@ -1338,13 +1387,13 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
             /* rollback: the ledger's inputs (confirmed, or the newest prediction) */
             for (int p = 0; p < s_NumPlayers; p++) {
                 n64net_pad n;
-                OSContPad *o = &samples[ridx].pads[p];
+                OSContPad *o = &samples[ridx].pads[s_SlotOf[p]];
                 n64net_input_get(s_Net, p, s_ResimTick, &n);
                 o->button = n.buttons;
                 o->stick_x = n.stick_x;
                 o->stick_y = n.stick_y;
                 o->errno = 0;
-                s_UsedPads[s_ResimTick % PAD_RING][p] = *o;
+                s_UsedPads[s_ResimTick % PAD_RING][s_SlotOf[p]] = *o;
             }
         }
         s_ResimTick++;
@@ -1412,9 +1461,10 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     }
 
     s32 idx = (curlast + 1) % CONTSAMPLE_LEN;
-    for (int p = 0; p < MAXCONTROLLERS; p++) {
-        samples[idx].pads[p] = pads[p];
-        s_UsedPads[tick % PAD_RING][p] = pads[p];
+    for (int p = 0; p < MAXCONTROLLERS; p++) {   /* game slot p = session player s_PlayerOfSlot[p] (online) */
+        const OSContPad *src = s_Online ? &pads[s_PlayerOfSlot[p]] : &pads[p];
+        samples[idx].pads[p] = *src;
+        s_UsedPads[tick % PAD_RING][p] = *src;
     }
 
     s_Tick++;
@@ -1462,6 +1512,11 @@ static void updateFullView(void)
     }
     np = (g_StageNum != 90 /* title / menus */) ? getPlayerCount() : 1;
     mask = mode > 0 ? forced : (int)(s_LocalMask ? s_LocalMask : (1u << s_Local));   /* this machine's players */
+    if (mode == 0) {   /* ... in the game's slots */
+        int sm = 0;
+        for (i = 0; i < 4; i++) if (mask & (1 << i)) sm |= 1 << s_SlotOf[i];
+        mask = sm;
+    }
     if (mode < 0 || (mode == 0 && !s_Online) || np < 2) {
         s_ViewOn = 0;
         return;
