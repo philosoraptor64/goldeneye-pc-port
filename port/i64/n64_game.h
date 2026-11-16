@@ -89,8 +89,11 @@ typedef struct n64_game_info {
 #define N64_DROPOUT_CAN_CPU    (1u << 0)  /* a CPU takes over the player (n64_game_cpu_options) */
 #define N64_DROPOUT_CAN_REMOVE (1u << 1)  /* the player leaves the match, which goes on */
 #define N64_DROPOUT_CAN_IDLE   (1u << 2)  /* the player stays, with no input */
+#define N64_DROPOUT_CAN_JOIN   (1u << 3)  /* someone arriving later may take over a player a CPU or idle took
+                                             over (n64_game_admit; the newcomer starts with N64_LAUNCH_JOINING) */
 
 #define N64_GAME_INFO_OWN_THREAD (1u << 0) /* see the lifecycle note above */
+#define N64_GAME_INFO_CAN_UNLOCK_ALL (1u << 1) /* the game can start with everything unlocked (N64_LAUNCH_UNLOCK_ALL) */
 
 N64_GAME_EXPORT const n64_game_info* n64_game_get_info(void);
 
@@ -253,6 +256,21 @@ typedef struct n64_launch {
 /* i64 drives n64_game_frame() from a display link at target_fps: the module
  * switches off its own frame pacing (sleeping to its frame schedule). */
 #define N64_LAUNCH_HOST_PACED (1u << 0)
+/* v2: i64 shows the session's host the drop-out menu and calls n64_game_dropout when a machine leaves a game
+ * of more than two machines (the others wait for the decision, up to 2 minutes). Without it a module ends the
+ * match on a drop-out, as nobody would decide. */
+#define N64_LAUNCH_DROPOUT_MENU (1u << 1)
+/* v2: this machine joins the game while it runs, in the place of machine local_machine (whose device left;
+ * a CPU or idle player took its players over). The launch is the one everyone started with (seed, session
+ * blob, player table with this machine in that place). The module catches up (n64net_input: config.joining,
+ * fast-forward through the host's input log; no pacing, drawing or sound needed) and its players become
+ * human again at the tick the host announces. */
+#define N64_LAUNCH_JOINING (1u << 2)
+/* everything unlocked (characters, modes, stages, options: what the game would otherwise unlock by playing), from
+ * i64's per-game setting; online the host's choice, the same on every machine. The module makes it part of the
+ * game's starting state and never writes it into the player's save file: an unlocked run keeps a save of its own
+ * (recomp runtime: recomp_save_subfolder "unlocked"), so its progress is kept too. */
+#define N64_LAUNCH_UNLOCK_ALL (1u << 3)
 
 #define N64_GAME_SESSION_BLOB_MAX (64 * 1024)
 
@@ -337,6 +355,12 @@ N64_GAME_EXPORT int n64_game_cpu_options(uint32_t player, n64_cpu_options* out);
  * Returns 0, or nonzero if it can't (i64 then ends the game). i64 resumes every machine after it. */
 N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_action action, const uint32_t* selection,
                                      uint32_t selection_count);
+
+/* Optional, with N64_DROPOUT_CAN_JOIN (the module of the machine that started the game): a new device takes
+ * over `machine`'s players (that machine left; they are CPUs or idle now). The new device starts the game
+ * with N64_LAUNCH_JOINING; this module brings it up to date (n64net_input_admit). Returns 0, or nonzero if
+ * it can't now. */
+N64_GAME_EXPORT int n64_game_admit(uint32_t machine);
 
 #ifdef __cplusplus
 }

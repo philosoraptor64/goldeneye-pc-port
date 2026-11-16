@@ -232,6 +232,9 @@ void portCrosshairPreview(s32 *r, s32 *g, s32 *b)
  * the first launch. F10 'All unlocked' row toggles it live. Cheats are unlocked at query time via fileGetIsCheatUnlocked
  * (src/game/file2.c, D442) -- the save file is never patched. */
 s32 portAllUnlocked = 0;
+/* i64 "everything unlocked" (N64_LAUNCH_UNLOCK_ALL): All unlocked for this run only -- never written to the
+ * ini, and the run keeps its own save file (ge007-unlocked.eep, libultra.c). Set by the module at start. */
+s32 portForceAllUnlocked = 0;
 
 /* D211: Video.FovScale as a multiplier on the render FOV. Applied game-side
  * at the guPerspectiveF chokepoint (src/fr.c) so it lands BEFORE the CPU

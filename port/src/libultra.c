@@ -1224,7 +1224,10 @@ s32 osContReset(OSMesgQueue *mq, OSContStatus *status)
  * (pd_port/port/src/libultra.c). */
 #define GE_EEP_BLOCKS  EEP16K_MAXBLOCKS          /* 256 */
 #define GE_EEP_SIZE    (GE_EEP_BLOCKS * 8)       /* 2048 bytes */
-#define GE_EEP_PATH    "$S/ge007.eep"
+#define GE_EEP_PATH_NORMAL   "$S/ge007.eep"
+#define GE_EEP_PATH_UNLOCKED "$S/ge007-unlocked.eep"   /* i64 everything-unlocked runs keep their own save */
+extern s32 portForceAllUnlocked;   /* port/src/video.c */
+#define GE_EEP_PATH    (portForceAllUnlocked ? GE_EEP_PATH_UNLOCKED : GE_EEP_PATH_NORMAL)
 
 static u8   s_eeprom[GE_EEP_SIZE];
 static int  s_eepromLoaded = 0;

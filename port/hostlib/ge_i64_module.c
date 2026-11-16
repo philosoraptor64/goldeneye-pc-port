@@ -90,7 +90,7 @@ static const n64_game_info kInfo = {
     GENET_BUILD_ID,
     4,  /* multiplayer: up to 4 players over up to 4 devices */
     60,
-    N64_GAME_INFO_OWN_THREAD,
+    N64_GAME_INFO_OWN_THREAD | N64_GAME_INFO_CAN_UNLOCK_ALL,
     N64_DROPOUT_CAN_REMOVE | N64_DROPOUT_CAN_IDLE,   /* drop-outs: the player is removed (dies, stays down) or stays, with no input */
     4,
 };
@@ -318,6 +318,13 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
     sAudioBuffered = host->audio_buffered;
     /* game-side settings (reset with the globals after every run) */
     snprintf(g_sysDataDir, sizeof(g_sysDataDir), "%s", host->data_dir);
+    {
+        /* everything unlocked (i64's per-game choice; online the host's, the same launch flag on every machine):
+         * All unlocked for this run and its own save file, ge007-unlocked.eep (port/src/libultra.c) */
+        extern int32_t portForceAllUnlocked;
+        portForceAllUnlocked = (launch->flags & N64_LAUNCH_UNLOCK_ALL) != 0;
+        if (portForceAllUnlocked && host->log) host->log("ge: everything unlocked (save: ge007-unlocked.eep)");
+    }
     g_gfxExternalWindow = host->window;
     if (host->audio_write) audioSetHostOutput(hostAudioWrite, hostAudioBuffered);
     static struct genetexternal ext;   /* reset with the globals after the run */

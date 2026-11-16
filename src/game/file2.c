@@ -411,8 +411,8 @@ bool fileGetIsCheatUnlocked(save_data *save, s32 cheat)
      * defined in port/src/video.c; levels/007 mode come from the game's own
      * debug flags seeded in port/src/main.c. */
     {
-        extern s32 portAllUnlocked;
-        if (portAllUnlocked) return TRUE;
+        extern s32 portAllUnlocked, portForceAllUnlocked;
+        if (portAllUnlocked || portForceAllUnlocked) return TRUE;
     }
     /* D301 (github #87): callers (front.c mode-select cheat rows, file.c
      * briefing cheat check) pass fileGetSaveForFoldernum(selected_folder_num)
@@ -700,8 +700,8 @@ STAGESTATUS fileIsStageUnlockedAtDifficulty(s32 foldernum, LEVEL_SOLO_SEQUENCE l
      * Magnum/Laser/Golden Gun and cheat.c level-unlock checks compare against
      * COMPLETED. Same bounds as the real path below. */
     {
-        extern s32 portAllUnlocked;
-        if (portAllUnlocked &&
+        extern s32 portAllUnlocked, portForceAllUnlocked;
+        if ((portAllUnlocked || portForceAllUnlocked) &&
             (levelid >= SP_LEVEL_DAM && levelid < SP_LEVEL_MAX) &&
             (difficulty >= DIFFICULTY_AGENT && difficulty < DIFFICULTY_MAX))
             return STAGESTATUS_COMPLETED;

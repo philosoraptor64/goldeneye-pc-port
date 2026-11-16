@@ -114,11 +114,11 @@ static void portAtExit(void)
 void portAllUnlockedApply(void)
 {
 #if defined(LEFTOVERDEBUG)
-    extern s32 portAllUnlocked;            /* port/src/video.c */
+    extern s32 portAllUnlocked, portForceAllUnlocked;   /* port/src/video.c */
     extern s32 debug_enable_all_levels_flag;  /* src/game/debugmenu_handler.c */
     extern s32 debug_007_unlock_flag;         /* ditto */
     static int s_seededLevels, s_seeded007;
-    if (portAllUnlocked) {
+    if (portAllUnlocked || portForceAllUnlocked) {
         if (!debug_enable_all_levels_flag) { debug_enable_all_levels_flag = 1; s_seededLevels = 1; }
         if (!debug_007_unlock_flag)        { debug_007_unlock_flag = 1;        s_seeded007 = 1; }
     } else {
