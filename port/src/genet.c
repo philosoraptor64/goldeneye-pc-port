@@ -974,8 +974,13 @@ s32 genetInitExternal(const struct genetexternal *x)
         return 0;
     }
     memcpy(s_HostEep, b + 8, GENET_EEP_SIZE);
-    if (!s_IsHost) {
-        portEepromAdopt(s_HostEep);   /* the guest plays on the host's save, in memory */
+    {
+        /* the guest plays on the host's save, in memory; with everything unlocked the host does too: the blob was
+         * made from its normal save before the run, while the run's own file is ge007-unlocked.eep */
+        extern s32 portForceAllUnlocked;
+        if (!s_IsHost || portForceAllUnlocked) {
+            portEepromAdopt(s_HostEep);
+        }
     }
     startSession();
     return 0;
