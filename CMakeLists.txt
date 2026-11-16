@@ -95,6 +95,11 @@ endif()
 # ASM is needed for the generated absolute ROM asset symbols
 # (port/src/romassets_<region>.s, see scripts/gen_romassets.py).
 project(ge007 C CXX ASM)
+
+# Shared builds must not carry this Mac's home folder (its user name) in compiled source paths
+if (NOT MSVC AND DEFINED ENV{HOME})
+    add_compile_options("-ffile-prefix-map=$ENV{HOME}=~")
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   # iPhone build (docs/netplay-notes.md "iOS"). GE_IOS selects the iOS paths
   # in port/ (Documents for data/saves, netplay.cfg, OpenGL ES context).
