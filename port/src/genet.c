@@ -856,7 +856,7 @@ static void startSession(void)
     }
     inputNetPure(1);
     netLog("connected as player %d (%s, input delay %u, seed %016llx%s)", s_Local + 1,
-           s_Rollback ? "rollback in matches, lockstep in menus" : "lockstep", n64net_input_get_delay(s_Net),
+           s_Rollback ? "rollback in menus and matches" : "lockstep", n64net_input_get_delay(s_Net),
            (unsigned long long)s_Seed, s_ExtSend ? ", through the host app" : "");
 }
 
@@ -1895,8 +1895,10 @@ static void rollbackPoint(void)
     /* only while the match is being played: once it's over (game-over screen,
      * controls locked) the stage end follows on button presses, and the
      * frames that end it (music, sound) must never be re-run */
-    want = g_StageNum != 90 && g_StageNum == s_LastStage && getPlayerCount() >= 2 && g_MainStageNum < 0 &&
-           T >= s_StageStart + s_RollbackFrom && lvlGetControlsLockedFlag() == 0;
+    /* also in the menus (stage 90: title, file select, multiplayer setup), past the first second of the
+     * stage like a match; a menu's stage change is settled before the stage unloads (genetStageExit) */
+    want = g_StageNum == s_LastStage && g_MainStageNum < 0 && T >= s_StageStart + s_RollbackFrom &&
+           (g_StageNum == 90 || (getPlayerCount() >= 2 && lvlGetControlsLockedFlag() == 0));
     if (!s_WindowOpen && want) {
         n64net_input_set_window(s_Net, s_RollbackWindow);
         n64net_input_set_auto_delay(s_Net, s_BaseDelay, 3);

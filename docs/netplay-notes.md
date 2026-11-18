@@ -103,8 +103,11 @@ host walks Multiplayer -> Start by script; `LATENCY/JITTER/LOSS`, `SERVER=local
 
 In a running multiplayer match the game predicts the other player's input
 and corrects mispredictions by rewinding and resimulating (n64net
-`n64net_rollback_frame`, window 8 frames, input delay 3); menus, the first
-second of a match and everything after the game-over screen are lockstep.
+`n64net_rollback_frame`, window 8 frames, input delay 3). Since 2026-11-18 the menus
+(stage 90) roll back too; the first second of each stage and everything after a
+match's game-over screen are lockstep. Menu rollback needed: the texture
+decoders' stack buffers zeroed (`image.c`, the file select read stack leftovers)
+and the EEPROM image in the snapshot (`libultra.c`, `__GESNAP`).
 GCC builds have no snapshots and stay lockstep (they still play with
 rollback builds). `GE_NET_ROLLBACK=0` forces lockstep.
 

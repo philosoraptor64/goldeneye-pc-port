@@ -223,6 +223,12 @@ s32 texInflateZlib(u8 *src, u8 *dst, s32 arg2, s32 forcenumimages, struct texpoo
     u8 scratch[0x2100];
     u16 palette[0x100];
 
+#ifdef PORT
+    /* as in texInflateNonZlib: no stack leftovers in decoded textures (netplay rollback) */
+    memset(scratch2, 0, sizeof(scratch2));
+    memset(scratch, 0, sizeof(scratch));
+    memset(palette, 0, sizeof(palette));
+#endif
     totalbytesout = 0;
     writetocache = FALSE;
 
@@ -955,6 +961,12 @@ s32 texInflateNonZlib(u8 *src, u8 *dst, s32 arg2, s32 forcenumimages, struct tex
     u8 scratch[0x2000];
     u8 lookup[0x1000];
     u32 stack;
+#ifdef PORT
+    /* Netplay rollback: the decoder reads palette entries a texture never fills (stack leftovers on the
+     * console). Zeroed here, so a resimulated frame decodes the same bytes (SyncTest, file select). */
+    memset(scratch, 0, sizeof(scratch));
+    memset(lookup, 0, sizeof(lookup));
+#endif
     s32 i;
     s32 numimages;
     s32 width;

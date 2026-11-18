@@ -1229,8 +1229,15 @@ s32 osContReset(OSMesgQueue *mq, OSContStatus *status)
 extern s32 portForceAllUnlocked;   /* port/src/video.c */
 #define GE_EEP_PATH    (portForceAllUnlocked ? GE_EEP_PATH_UNLOCKED : GE_EEP_PATH_NORMAL)
 
-static u8   s_eeprom[GE_EEP_SIZE];
-static int  s_eepromLoaded = 0;
+/* In the rollback snapshot (Apple clang builds): a menu frame that writes the save and is then rolled back must
+ * leave the save as it was (netplay rollback in menus). Re-entry resets it with the snapshot segment too. */
+#if defined(__APPLE__) && defined(__clang__)
+#define GE_EEP_SNAP __attribute__((section("__GESNAP,__bss")))
+#else
+#define GE_EEP_SNAP
+#endif
+static u8   s_eeprom[GE_EEP_SIZE] GE_EEP_SNAP;
+static int  s_eepromLoaded GE_EEP_SNAP;
 
 static void geEepromLoad(void)
 {
