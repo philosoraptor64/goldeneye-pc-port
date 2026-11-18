@@ -111,6 +111,27 @@ typedef enum n64_net_event {
 
 /* Everything a module may use from i64. Function pointers may be called from
  * the main thread; those marked [any thread] also from the module's threads. */
+/* One N64 controller's state (n64_host.pad_read): the button bits of the N64's OSContPad. */
+typedef struct n64_pad_state {
+    uint16_t buttons;   /* N64_PAD_* */
+    int8_t stick_x;     /* -80..80 (left/right) */
+    int8_t stick_y;     /* -80..80 (down/up) */
+} n64_pad_state;
+#define N64_PAD_A 0x8000
+#define N64_PAD_B 0x4000
+#define N64_PAD_Z 0x2000
+#define N64_PAD_START 0x1000
+#define N64_PAD_DU 0x0800
+#define N64_PAD_DD 0x0400
+#define N64_PAD_DL 0x0200
+#define N64_PAD_DR 0x0100
+#define N64_PAD_L 0x0020
+#define N64_PAD_R 0x0010
+#define N64_PAD_CU 0x0008
+#define N64_PAD_CD 0x0004
+#define N64_PAD_CL 0x0002
+#define N64_PAD_CR 0x0001
+
 typedef struct n64_host {
     uint32_t abi_version;
 
@@ -191,7 +212,20 @@ typedef struct n64_host {
     /* Like net_poll_event, with the machine the event is about (AWAY/BACK/LEFT). */
     int (*net_poll_event_from)(uint32_t* machine);
     int (*voice_machine_speaking)(uint32_t machine);  /* that machine's voice is audible now */
+
+    /* v2, added 2026-11-16 (i64 and its modules ship together; check the pointer before use): i64's own
+     * controllers, the same for every game (docs/controllers.md). Pad k = this device's k-th controller, the
+     * numbering n64_launch.players[].pad uses. One mapping and deadzone for all games:
+     *   A -> A, B and X -> B, LT -> Z, LB -> L, RB and RT -> R, Start/Menu -> Start, D-pad -> D-pad,
+     *   right stick -> C buttons, left stick -> stick in N64 units (about +-80 at full tilt, deadzone 12%).
+     * On a Mac without a controller, the keyboard is pad 0 (arrows = stick, X A, C B, Z Z, Enter Start, Q L,
+     * E R, I/J/K/L C buttons, T/F/G/H D-pad). [main thread or the game thread] */
+    uint32_t (*pad_count)(void);                                   /* this device's controllers now */
+    int (*pad_read)(uint32_t pad, struct n64_pad_state* out);      /* 1, or 0 if there is no such pad */
+    void (*pad_rumble)(uint32_t pad, float strength);              /* 0..1; 0 = off */
 } n64_host;
+
+
 
 /* i64's executable defines the global operator new/delete and forwards them
  * here. Mario Kart's rollback keeps its C++ simulation objects in its own
@@ -271,6 +305,10 @@ typedef struct n64_launch {
  * game's starting state and never writes it into the player's save file: an unlocked run keeps a save of its own
  * (recomp runtime: recomp_save_subfolder "unlocked"), so its progress is kept too. */
 #define N64_LAUNCH_UNLOCK_ALL (1u << 3)
+/* v2, with N64_LAUNCH_JOINING: this machine is a new one taking over players nobody played (CPUs; n64_game_add),
+ * not a departed machine's place. Its players' controllers weren't there when the game started: a game that
+ * sees controller presence counts them as plugged in only from the tick n64net_input_rejoined gives. */
+#define N64_LAUNCH_JOIN_NEW (1u << 4)
 
 #define N64_GAME_SESSION_BLOB_MAX (64 * 1024)
 
@@ -300,6 +338,20 @@ N64_GAME_EXPORT n64_frame_result n64_game_frame(void);
  * went back to i64, 2 = the friend did, 0 = back into the game. Online, both
  * sides tell each other (no one gives up on the silence meanwhile). */
 N64_GAME_EXPORT void n64_game_set_paused(int paused);
+
+/* Optional (added 2026-11-18, todo items 9/18): the app went out of view = 1 (iOS: the background, e.g. the
+ * player swiped to another app), or came back = 0. A module that exports this keeps its game running while
+ * hidden, like a music app: i64 goes on calling n64_game_frame() at target_fps (from a timer: the display link
+ * stops in the background) and plays its audio; online, the others are not told to wait. Until set_hidden(0)
+ * the module must not touch the GPU (no drawing, presenting or next-drawable calls: iOS forbids GPU work in the
+ * background), and nothing in it may wait on a frame being shown.
+ * Without it, i64 stops calling frame() while hidden and the others wait for this device (as before), and
+ * the module gets SDL_APP_WILLENTERBACKGROUND / SDL_APP_DIDENTERFOREGROUND as SDL events.
+ * In both cases SDL's own lifecycle events never reach a module: on iOS SDL sends "will enter background"
+ * (and window minimized/focus lost) as soon as the app is merely inactive (the app switcher, Control Center,
+ * a split-view resize), while the game is still on screen. i64 drops those and sends the background events
+ * itself, only for the real background. [main thread] */
+N64_GAME_EXPORT void n64_game_set_hidden(int hidden);
 
 /* Optional. After set_paused(1 or 2), i64 keeps calling frame() until this
  * returns 1 (at most ~1.5 s), then stops: a game can use those frames to open
@@ -361,6 +413,17 @@ N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_action action,
  * with N64_LAUNCH_JOINING; this module brings it up to date (n64net_input_admit). Returns 0, or nonzero if
  * it can't now. */
 N64_GAME_EXPORT int n64_game_admit(uint32_t machine);
+
+/* Optional (v2, added 2026-11-16), joining into players nobody has played (CPUs from the start):
+ * n64_game_open_players: the players a newcomer could take over now (bit p = player p; this game's ports),
+ * e.g. CPUs in a match that never had a human. Asked on the machine that started the game. 0 = none.
+ * n64_game_add: the newcomer becomes the new `machine` (the next index) and takes `player_mask` over
+ * (n64net_input_add). The newcomer starts with N64_LAUNCH_JOINING; in its player table those players are its
+ * own, and players nobody plays are listed with machine N64_MACHINE_NONE. Every machine turns the CPUs into
+ * humans at the tick n64net_input_rejoined gives. Returns 0, or nonzero if it can't now. */
+#define N64_MACHINE_NONE 0xFF
+N64_GAME_EXPORT uint32_t n64_game_open_players(void);
+N64_GAME_EXPORT int n64_game_add(uint32_t machine, uint32_t player_mask);
 
 #ifdef __cplusplus
 }

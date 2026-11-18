@@ -1614,7 +1614,7 @@ int genetFullViewRect(int *left, int *top, int *width, int *height)
  * start of a frame and tells the other player we're away; it waits as long as
  * it takes (n64net: a peer that is away is never dropped), unlike a lost
  * connection. GE_NET_TEST_AWAY=<tick>:<secs> simulates it (tests). */
-extern bool gfx_sdl_app_inactive;
+extern _Bool gfx_sdl_app_inactive;   /* a C++ bool (1 byte) in gfx_sdl2.cpp: _Bool, not this file's bool */
 static int s_AwaySent = 0;
 
 static int awayNow(void)

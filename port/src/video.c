@@ -41,7 +41,7 @@ extern void exit(int status);
 #include "../fast3d/gfx_opengl.h"
 #if defined(GE_HAVE_METAL)
 extern struct GfxRenderingAPI gfx_metal_api;   /* port/fast3d/gfx_metal.mm */
-extern bool gfx_sdl_use_metal;                 /* port/fast3d/gfx_sdl2.cpp */
+extern _Bool gfx_sdl_use_metal;   /* a C++ bool (1 byte) in gfx_sdl2.cpp; this file's bool is 4 bytes */                 /* port/fast3d/gfx_sdl2.cpp */
 #endif
 
 /* GE's internal resolution before the game's first osViSetMode (which then

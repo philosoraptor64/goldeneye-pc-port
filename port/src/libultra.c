@@ -273,6 +273,8 @@ static void portHeartbeatCheck(void)
      * dumps. Use a longer window and stop after a few reports. */
     static int fired = 0;
     uint64_t now = sysGetMicroseconds();
+    extern _Bool gfx_sdl_run_hidden;   /* i64 out of view: nothing is drawn on purpose (gfx_sdl2.cpp, a C++ bool) */
+    if (gfx_sdl_run_hidden) g_lastFrameUs = now;
     if (fired < 3 && now - g_lastFrameUs > 8000000 && now - g_lastHeartbeatUs > 5000000) {
         fired++;
         g_lastHeartbeatUs = now;
