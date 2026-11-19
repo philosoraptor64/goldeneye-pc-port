@@ -1145,6 +1145,13 @@ static OSContStatus g_contStatus[MAXCONTROLLERS];
 static OSContPad g_contPad[MAXCONTROLLERS];
 static u8 g_contConnected = 0x1; /* controller 0 connected */
 
+/* i64 module: i64's controllers (n64_host.pad_read / pad_rumble), set by ge_i64_module.c at every start (reset
+ * with the globals after a run). One mapping, deadzone and remap table for every game: inside i64 the port's own
+ * pad/keyboard/mouse mapping (dual-stick aim, mouse look) is not used; the right stick is the C buttons, as on
+ * the N64. NULL = the port's own input (stand-alone, or an older i64). */
+int (*g_portHostPadRead)(unsigned pad, unsigned short *buttons, signed char *sx, signed char *sy) = NULL;
+void (*g_portHostPadRumble)(unsigned pad, float strength) = NULL;
+
 /* Snapshot all controllers from the SDL input module (port/src/input.c).
  * That module owns the keyboard/mouse/gamepad -> N64 mapping and the
  * mouse-look -> C-button bridge; this just marshals its output into the
@@ -1152,6 +1159,25 @@ static u8 g_contConnected = 0x1; /* controller 0 connected */
 static void contSnapshotFromKeyboard(void)
 {
     inputUpdate();
+
+    if (g_portHostPadRead) {
+        u8 hostMask = 0;
+        for (int i = 0; i < MAXCONTROLLERS; ++i) {
+            unsigned short b = 0;
+            signed char sx = 0, sy = 0;
+            const int connected = g_portHostPadRead((unsigned)i, &b, &sx, &sy);
+            if (connected) hostMask |= (u8)(1 << i);
+            g_contStatus[i].type   = connected ? CONT_TYPE_NORMAL : 0;
+            g_contStatus[i].status = connected ? CONT_CARD_ON : 0;   /* a Rumble Pak: i64 drops it for pads without a motor */
+            g_contStatus[i].errno  = connected ? 0 : CONT_NO_RESPONSE_ERROR;
+            g_contPad[i].button  = connected ? (u16)b : 0;
+            g_contPad[i].stick_x = connected ? sx : 0;
+            g_contPad[i].stick_y = connected ? sy : 0;
+            g_contPad[i].errno   = connected ? 0 : CONT_NO_RESPONSE_ERROR;
+        }
+        g_contConnected = hostMask ? hostMask : 0x1;   /* controller 0 is always there, as stand-alone */
+        return;
+    }
 
     const s32 mask = inputConnectedMask();
     g_contConnected = (u8)mask;

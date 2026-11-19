@@ -249,6 +249,18 @@ N64_GAME_EXPORT uint32_t n64_game_session_blob(const n64_host *host, void *out, 
 
 /* ------------------------------------------------------------------ runs */
 
+extern int (*g_portHostPadRead)(unsigned pad, unsigned short *buttons, signed char *sx, signed char *sy);   /* libultra.c */
+extern void (*g_portHostPadRumble)(unsigned pad, float strength);
+static int hostPadRead(unsigned pad, unsigned short *buttons, signed char *sx, signed char *sy)
+{
+    n64_pad_state st;
+    if (!sHost || !sHost->pad_read || !sHost->pad_read(pad, &st)) return 0;
+    *buttons = st.buttons;
+    *sx = st.stick_x;
+    *sy = st.stick_y;
+    return 1;
+}
+
 static void hostAudioWrite(const short *stereo, unsigned frames, unsigned rate)
 {
     if (sAudioWrite) sAudioWrite((const int16_t *)stereo, frames, rate);
@@ -348,6 +360,10 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         g_geNetExternal = &ext;
     }
     g_portHostTakeReserved = (int (*)(unsigned long long, unsigned long long))host->take_reserved;
+    if (host->abi_version >= 2 && host->pad_read) {   /* i64's controllers for every game */
+        g_portHostPadRead = hostPadRead;
+        g_portHostPadRumble = host->pad_rumble;
+    }
     g_portAddrError[0] = '\0';
     if (geModuleStart() != 0) {
         if (g_portAddrError[0]) {

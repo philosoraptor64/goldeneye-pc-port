@@ -3505,8 +3505,14 @@ static SDL_atomic_t s_rumbleStopped;
 
 void inputRumble(int idx, f32 strength, f32 time)
 {
+    extern void (*g_portHostPadRumble)(unsigned pad, float strength);   /* libultra.c: i64's controllers */
     if (SDL_AtomicGet(&s_rumbleStopped)) return;
     if (idx < 0 || idx >= MAX_PADS) return;
+    if (g_portHostPadRumble) {
+        g_portHostPadRumble((unsigned)idx, strength > 0.f ? strength : 0.f);
+        (void)time;
+        return;
+    }
     SDL_GameController *rpad = slotPad(idx);
     const int rIdx = (inputMpSplit() && inputMpKbmP1()) ? idx - 1 : idx;
     if (!rpad) return;
