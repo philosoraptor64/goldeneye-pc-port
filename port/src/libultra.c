@@ -139,10 +139,22 @@ static int g_determPreTaskTicksGranted = 0;
 static int g_determTraceEnabled = 0;
 static u32 g_determTraceSeq = 0;
 
+/* Joining a running match (genet.c catchingNow): the frames being caught up run as fast as the game can play
+ * them. osRecvMesg then gives the scheduler its next retrace at once (at most one per kCatchupRetraceUs, none
+ * while i64 holds the game at its catch-up gate), and each one moves this clock a frame ahead, so boss.c's
+ * frame gate opens. The simulation doesn't read the clock online (fixed ticks, genet.c), so the jump ahead is
+ * harmless; it stays as an offset afterwards (only differences of the clock are used). */
+extern volatile int g_genetCatchingUp, g_genetCatchupHeld;
+static u32 g_portClockAhead = 0;
+#define kCatchupRetraceUs 250
+
 u32 osGetCount(void)
 {
     if (g_determEnabled) {
         return g_determTicks;
+    }
+    if (g_portClockAhead) {
+        return (u32)(((uint64_t)sysGetMicroseconds() * 465525ull) / 10000ull) + __atomic_load_n(&g_portClockAhead, __ATOMIC_ACQUIRE);
     }
     /* The N64 RSP core counter advances at ~OS_CPU_COUNTER (~46.5 MHz), NOT
      * microseconds. GE's pacing assumes this rate: waitForNextFrame() in
@@ -770,6 +782,24 @@ s32 osRecvMesg(OSMesgQueue *mq, OSMesg *msg, s32 flag)
             mq->msg[(mq->first + mq->validCount) % mq->msgCount] = g_viRetraceMsg;
             ++mq->validCount;
             break;
+        }
+        if (g_genetCatchingUp && mq == g_viRetraceMQ) {
+            /* catching up: the next retrace now (see osGetCount) */
+            static uint64_t lastUs = 0;
+            const uint64_t now = sysGetMicroseconds();
+            if (!g_genetCatchupHeld && now - lastUs >= kCatchupRetraceUs) {
+                lastUs = now;
+                __atomic_add_fetch(&g_portClockAhead, g_determQuantum, __ATOMIC_ACQ_REL);
+                mq->msg[(mq->first + mq->validCount) % mq->msgCount] = g_viRetraceMsg;
+                ++mq->validCount;
+                break;
+            }
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += kCatchupRetraceUs * 1000L;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            pthread_cond_timedwait(&pq->cond, &pq->lock, &ts);
+            continue;
         }
         /* Log each queue's first blocking call site (the return address is
          * the caller); symbolicate with addr2line to find where in game code
@@ -2157,7 +2187,10 @@ static void *portRenderWorker(void *arg)
          * the previous frame's unshown slots stay queued (ring), they are not
          * dropped: the new frame's slots come after them on the grid. */
         const int hz = videoInterpHz();
-        if (hz > 0 && viUs != 0) {
+        if (g_genetCatchingUp) {
+            g_lastFrameUs = sysGetMicroseconds();   /* caught-up frames are never drawn (genet.c catchingNow) */
+            __atomic_add_fetch(&s_gfxDrawn, 1, __ATOMIC_RELEASE);   /* but done (portRenderWaitIdle counts them) */
+        } else if (hz > 0 && viUs != 0) {
             portInterpPresentBeforeDraw(viUs);
             const int64_t d0 = (int64_t)sysGetMicroseconds();
             const int q0 = s_qLen;
@@ -2261,8 +2294,13 @@ void osSpTaskStartGo(OSTask *t)
         pthread_mutex_unlock(&s_rwLock);
         return;
     } else {
-        /* Graphics task: run the software RSP on the display list inline. */
-        portRenderGfxTask((Gfx *)t->t.data_ptr);
+        /* Graphics task: run the software RSP on the display list inline.
+         * Joining a running match (genet.c catchingNow): the frames being caught up are never drawn. */
+        if (g_genetCatchingUp) {
+            g_lastFrameUs = sysGetMicroseconds();   /* not a hang (portHeartbeatCheck) */
+        } else {
+            portRenderGfxTask((Gfx *)t->t.data_ptr);
+        }
         __atomic_add_fetch(&s_gfxDrawn, 1, __ATOMIC_RELEASE);
     }
 

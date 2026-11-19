@@ -302,6 +302,8 @@ static void audioServiceDeviceRequests(void)
 
 void audioSetNextBuffer(const s16 *buf, u32 len)
 {
+    extern volatile int g_genetCatchingUp;   /* genet.c: joining a running match, the caught-up frames are unheard */
+    if (g_genetCatchingUp) return;
     audioServiceDeviceRequests();
     if (!s_audioDumpChecked) {
         s_audioDumpChecked = 1;

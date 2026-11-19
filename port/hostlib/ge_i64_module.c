@@ -34,6 +34,8 @@
 #include "genet_build_id.h"
 
 #include <errno.h>
+#include <pthread.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,12 +66,24 @@ struct genetexternal {
     int32_t padofplayer[4];
     int32_t machineofplayer[4];
     int32_t dropoutmenu;
+    int32_t joining;
 };
 extern struct genetexternal *g_geNetExternal;   /* main.c */
 extern uint32_t genetSessionBlob(void *out, uint32_t cap);
 extern void genetExternalEvent(int32_t event);
 extern void genetExternalEventFrom(int32_t event, int32_t machine);
 extern int32_t genetDropout(int32_t player, int32_t action);
+extern int32_t genetAdmit(int32_t machine);
+extern int32_t genetCatchingUp(uint32_t *done, uint32_t *total);
+extern void (*g_genetCatchupGate)(void);
+extern volatile int g_genetCatchupHeld;
+#ifndef N64_LAUNCH_JOINING
+#define N64_LAUNCH_JOINING (1u << 2)
+#endif
+#ifndef N64_DROPOUT_CAN_JOIN
+#define N64_DROPOUT_CAN_JOIN (1u << 3)
+#endif
+#define GE_FRAME_WAITING ((n64_frame_result)2)   /* N64_GAME_FRAME_WAITING (i64's catch-up driver) */
 #ifndef N64_LAUNCH_DROPOUT_MENU
 #define N64_LAUNCH_DROPOUT_MENU (1u << 1)   /* proposed: i64 shows the host a drop-out menu */
 #endif
@@ -92,7 +106,8 @@ static const n64_game_info kInfo = {
     4,  /* multiplayer: up to 4 players over up to 4 devices */
     60,
     N64_GAME_INFO_OWN_THREAD | N64_GAME_INFO_CAN_UNLOCK_ALL,
-    N64_DROPOUT_CAN_REMOVE | N64_DROPOUT_CAN_IDLE,   /* drop-outs: the player is removed (dies, stays down) or stays, with no input */
+    /* drop-outs: the player is removed (dies, stays down) or stays, with no input; a new device may take over */
+    N64_DROPOUT_CAN_REMOVE | N64_DROPOUT_CAN_IDLE | N64_DROPOUT_CAN_JOIN,
     4,
 };
 
@@ -284,6 +299,76 @@ static int previewDue(unsigned f) {
     return 1;
 }
 
+/* ---- joining mid-game ----------------------------------------------------
+ * The host's module: n64_game_admit. The joiner (N64_LAUNCH_JOINING) plays the host's input log from tick 0 on the
+ * game's own thread, unpaced, with nothing drawn or heard (genet.c catchingNow). i64's catch-up driver meters it:
+ * each n64_game_catch_up_tick() lets the game thread play one tick (it waits at its frame boundary for the next
+ * one) and waits a little for it. Without that driver (an older i64 calls n64_game_frame() instead), the game
+ * thread catches up by itself as fast as it can. */
+static pthread_mutex_t sCatchLock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sCatchCond = PTHREAD_COND_INITIALIZER;
+static uint64_t sCatchArrived;   /* times the game thread reached the gate (= ticks played + 1) */
+static uint64_t sCatchTarget;    /* the tick being granted is done when sCatchArrived reaches this */
+static int sCatchGranted;        /* a tick the game thread may play */
+static int sCatchSelf;           /* no driver: free-running */
+static int sCatchDriverTest;     /* GE_CATCHUP_TESTDRIVER=1 */
+static unsigned sCatchDriverTicks, sCatchDriverFrames;
+
+static void catchupGate(void)   /* game thread, at each frame boundary while catching up */
+{
+    extern volatile int g_portQuit;
+    pthread_mutex_lock(&sCatchLock);
+    sCatchArrived++;
+    pthread_cond_broadcast(&sCatchCond);
+    if (!sCatchSelf && !sCatchGranted) g_genetCatchupHeld = 1;   /* no retraces meanwhile (libultra.c) */
+    while (!sCatchSelf && !sCatchGranted && !g_portQuit && genetCatchingUp(NULL, NULL)) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&sCatchCond, &sCatchLock, &ts);
+    }
+    sCatchGranted = 0;
+    g_genetCatchupHeld = 0;
+    pthread_mutex_unlock(&sCatchLock);
+}
+
+N64_GAME_EXPORT int n64_game_catching_up(uint32_t *done, uint32_t *total)
+{
+    if (!sRunning) return 0;
+    return genetCatchingUp(done, total) ? 1 : 0;
+}
+
+N64_GAME_EXPORT n64_frame_result n64_game_catch_up_tick(void)
+{
+    if (!sRunning || genetEndReason()[0]) return N64_GAME_FRAME_EXIT;
+    if (!genetCatchingUp(NULL, NULL)) return N64_GAME_FRAME_CONTINUE;
+    pthread_mutex_lock(&sCatchLock);
+    if (sCatchArrived >= sCatchTarget) {   /* the last tick is done (or none was granted): grant the next */
+        sCatchTarget = sCatchArrived + 1;
+        sCatchGranted = 1;
+        pthread_cond_broadcast(&sCatchCond);
+    }
+    /* a short wait keeps i64's frame responsive: a long tick (a stage load) or inputs still on their way just
+     * mean "try again next frame" */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 4 * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    while (sCatchArrived < sCatchTarget) {
+        if (pthread_cond_timedwait(&sCatchCond, &sCatchLock, &ts) != 0) break;
+    }
+    const int done = sCatchArrived >= sCatchTarget;
+    pthread_mutex_unlock(&sCatchLock);
+    return done ? N64_GAME_FRAME_CONTINUE : GE_FRAME_WAITING;
+}
+
+/* the session's host: a new device takes over `machine`'s players (they are idle or removed since it left) */
+N64_GAME_EXPORT int n64_game_admit(uint32_t machine)
+{
+    return genetAdmit((int32_t)machine);
+}
+
 N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launch, char *err, size_t err_size)
 {
     if (sRunning) {
@@ -344,6 +429,7 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         ext.localplayer = launch->local_machine == 0 ? 0 : 1;   /* genet: 0 = the session's host */
         ext.numplayers = (int32_t)launch->player_count;
         ext.dropoutmenu = (launch->flags & N64_LAUNCH_DROPOUT_MENU) != 0;
+        ext.joining = (launch->flags & N64_LAUNCH_JOINING) != 0;
         for (uint32_t p = 0; p < launch->player_count && p < 4; p++) {
             ext.machineofplayer[p] = launch->players[p].machine;
             if (launch->players[p].local) {
@@ -359,6 +445,13 @@ N64_GAME_EXPORT int n64_game_start(const n64_host *host, const n64_launch *launc
         ext.hostpaced = 0;   /* the game's own threads keep its schedule */
         g_geNetExternal = &ext;
     }
+    sCatchArrived = 0;
+    sCatchTarget = 0;
+    sCatchGranted = 0;
+    sCatchSelf = getenv("GE_CATCHUP_SELF") != NULL;   /* test aid: no driver even with a new i64 */
+    sCatchDriverTest = getenv("GE_CATCHUP_TESTDRIVER") != NULL;
+    sCatchDriverTicks = sCatchDriverFrames = 0;
+    g_genetCatchupGate = catchupGate;
     g_portHostTakeReserved = (int (*)(unsigned long long, unsigned long long))host->take_reserved;
     if (host->abi_version >= 2 && host->pad_read) {   /* i64's controllers for every game */
         g_portHostPadRead = hostPadRead;
@@ -395,7 +488,36 @@ extern _Bool gfx_sdl_run_hidden;   /* a C++ bool (1 byte) in gfx_sdl2.cpp: i64 o
 N64_GAME_EXPORT n64_frame_result n64_game_frame(void)
 {
     if (!sRunning) return N64_GAME_FRAME_EXIT;
-    if (!gfx_sdl_run_hidden && previewDue(++sPreviewFrames) && gPortFrameCaptureCallback) gPortFrameCaptureRequest = 1;
+    if (sCatchDriverTest && genetCatchingUp(NULL, NULL)) {
+        /* test aid GE_CATCHUP_TESTDRIVER=1: what i64's catch-up driver does (until it is in i64) */
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        unsigned n = 0;
+        for (;;) {
+            const n64_frame_result r = n64_game_catch_up_tick();
+            if (r != N64_GAME_FRAME_CONTINUE) break;
+            n++;
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            if ((t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec) > 14000000L || !genetCatchingUp(NULL, NULL)) break;
+        }
+        sCatchDriverTicks += n;
+        sCatchDriverFrames++;
+        if (!genetCatchingUp(NULL, NULL) && sHost && sHost->log) {
+            char m[160];
+            snprintf(m, sizeof(m), "ge: test driver: caught up, %u ticks over %u frames", sCatchDriverTicks, sCatchDriverFrames);
+            sHost->log(m);
+        }
+        return N64_GAME_FRAME_CONTINUE;
+    }
+    if (genetCatchingUp(NULL, NULL) && !sCatchSelf) {
+        /* i64 calls frames while this machine catches up: no catch-up driver, the game thread runs freely */
+        pthread_mutex_lock(&sCatchLock);
+        sCatchSelf = 1;
+        pthread_cond_broadcast(&sCatchCond);
+        pthread_mutex_unlock(&sCatchLock);
+        if (sHost && sHost->log) sHost->log("ge: catching up on the game's own thread (no catch-up driver in i64)");
+    }
+    if (!gfx_sdl_run_hidden && !genetCatchingUp(NULL, NULL) && previewDue(++sPreviewFrames) && gPortFrameCaptureCallback) gPortFrameCaptureRequest = 1;
     if (sHost && sHost->abi_version >= 2 && sHost->net_poll_event_from) {
         uint32_t m = 0;
         int ev;
@@ -434,6 +556,10 @@ N64_GAME_EXPORT void n64_game_stop(void)
     if (!sRunning) return;
     gPortFrameCaptureCallback = NULL;
     gPortFrameCaptureRequest = 0;
+    pthread_mutex_lock(&sCatchLock);   /* a game thread waiting at the catch-up gate must reach its quit point */
+    sCatchSelf = 1;
+    pthread_cond_broadcast(&sCatchCond);
+    pthread_mutex_unlock(&sCatchLock);
     if (geModuleStop() != 0) sBroken = 1;
     sRunning = 0;
     sHost = NULL;

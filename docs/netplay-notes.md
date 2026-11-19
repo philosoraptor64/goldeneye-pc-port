@@ -259,3 +259,27 @@ glue in port/hostlib/ge_i64_module.c, id `ge007-us`, ROM SHA-1 abe01e4a...). Mac
 - **Pause:** `n64_game_set_paused` -> `g_portHostPaused`. Offline the game thread waits at its per-frame
   gfxFrameMsgQ receive (port layer); online genet's away handling (awayNow) holds and tells the other player. Both
   give way to the re-entry shutdown. Tested: `I64_TEST_PAUSE=300:3` offline, resume, stop.
+
+## Joining mid-game (MacBook, 2026-11-19, branch `i64-owns`)
+A device that left can be replaced while the match runs (i64: the host picks "idle" for the leaver, a newcomer
+asks to join, the host lets it in). i64 doesn't offer a removed player's place; genet would let that player
+respawn from the rejoin tick if it did.
+- **Host:** `n64_game_admit(machine)` -> `genetAdmit` -> `n64net_input_admit` (streams the input log). The host
+  app's requests (drop-out choices, admits) are queued and applied on the game thread, which owns `s_Net`
+  (`applyRequests`: at the frame boundary and inside the input/away waits, which may be what is waiting).
+- **Joiner** (`N64_LAUNCH_JOINING` -> `genetexternal.joining`; needs the session blob): plays from tick 0
+  with the host's log (`n64net_input_config.joining`). While `catchingNow()`: no pacing, time sync or away
+  hold; `g_genetCatchingUp` makes libultra.c skip drawing (inline and render-worker paths, frames still
+  counted as drawn: rollback's `portRenderWaitIdle` waits for them) and audio.c drop the audio. Real-time
+  pacing lives in libultra (VI pacemaker + `osGetCount` gate in boss.c), so while catching up `osRecvMesg`
+  hands the scheduler its next retrace at once (at most one per 250 us) and moves the clock a frame ahead per
+  retrace (`g_portClockAhead`, kept as an offset afterwards; the simulation never reads the clock online).
+- **i64's catch-up driver** (`n64_game_catching_up` / `n64_game_catch_up_tick`, Studio's shape on board #5):
+  GE plays on its own thread, so each `catch_up_tick` grants the game thread one tick at its frame boundary
+  (`catchupGate`, module) and waits up to 4 ms for it (else `N64_GAME_FRAME_WAITING`). An i64 without the
+  driver calls `n64_game_frame` instead: the module then lets the thread run freely.
+- Test: scratchpad `ge-join.sh` (3 Mac copies, one leaves, a 4th joins): `DROP=3 EXTRA="GE_NET_BOT=1
+  GE_STARTMP=3,1 GE_MPVIRT=1"`; `GE_CATCHUP_TESTDRIVER=1` imitates i64's driver, `GE_CATCHUP_SELF=1` forces
+  the free run. Results: caught up ~1500 ticks in 0.8 s (free) / 1.6 s (driver, 92 i64 frames), then delay 2,
+  worst round trip 34 ms, every sync check matched on all three.
+- Also fixed: `n64_game_dropout` wasn't in exports.txt (i64 never saw GE's drop-out handling).

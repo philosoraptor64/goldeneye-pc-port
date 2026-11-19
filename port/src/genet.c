@@ -162,7 +162,19 @@ static int s_MachineOf[4] = { 0, 1, 2, 3 };
 static unsigned s_LeftMachines = 0;
 static unsigned long long s_LeftAtUs = 0;
 static int s_DropoutMenu = 0;
+/* ---- joining mid-game (see genetCatchingUp) ---- */
+static int s_Joining = 0;                 /* this machine joins a running match (i64: N64_LAUNCH_JOINING) */
+static int s_CaughtUp = 0;                /* it has played up to the live tick */
+static volatile u32 s_CatchLive = 0;      /* the live tick (0 while unknown), for the progress display */
+static unsigned long long s_CatchStartUs = 0;
+volatile int g_genetCatchingUp = 0;       /* libultra.c / audio.c: nothing drawn or heard while catching up */
+volatile int g_genetCatchupHeld = 0;      /* the host app holds the game thread at its catch-up gate */
+void (*g_genetCatchupGate)(void) = NULL;
+/* the host app's requests (its main thread) are applied on the game thread, which owns s_Net */
+static volatile u32 s_AdmitReq = 0;       /* machine + 1 */
+static volatile u32 s_DropReq[4];         /* action + 1 per player */
 static void machineLeft(int m);
+static void applyRequests(void);
 static int otherMachine(void);
 static int s_Mismatch = 0;
 static int s_NumPlayers = 2;
@@ -637,8 +649,8 @@ static void machineLeft(int m)
     }
     {
         const int act = !strcmp(t, "remove") ? GENET_ACT_REMOVE : GENET_ACT_IDLE;   /* GE_TEST_DROPOUT=idle|remove */
-        for (int p = 0; p < s_NumPlayers; p++) {
-            if (s_MachineOf[p] == m) retirePlayer(p, act);
+        for (int p = 0; p < s_NumPlayers; p++) {   /* may run on the host app's thread: applied by applyRequests */
+            if (s_MachineOf[p] == m) __atomic_store_n(&s_DropReq[p], (u32)act + 1, __ATOMIC_RELEASE);
         }
     }
 }
@@ -657,6 +669,10 @@ s32 genetPlayerRemoved(s32 player)
     player = s_PlayerOfSlot[player];   /* the game's slot -> the session's player */
     if (!n64net_input_retired(s_Net, player, &last, &apply, act, &size) || size < 1 || act[0] != GENET_ACT_REMOVE) return 0;
     if (tick < apply) return 0;
+    {
+        u32 back = 0;   /* a new device took the player over: from that tick it plays (respawns) again */
+        if (n64net_input_rejoined(s_Net, player, &back) && tick >= back) return 0;
+    }
     if (!s_Resim) netLog("player %d removed at tick %u (the game takes it out)", player + 1, (unsigned)tick);
     return 1;
 }
@@ -665,7 +681,74 @@ s32 genetDropout(s32 player, s32 action)
 {
     if (!s_Online || !s_IsHost || player < 0 || player >= s_NumPlayers) return 1;
     if (action != GENET_ACT_IDLE && action != GENET_ACT_REMOVE) return 1;
-    return retirePlayer(player, action);
+    __atomic_store_n(&s_DropReq[player], (u32)action + 1, __ATOMIC_RELEASE);   /* applied by applyRequests */
+    return 0;
+}
+
+/* The session's host: a new device takes over the players of `machine` (which left; they are idle or removed
+ * now). n64net streams it the input log, and every machine makes those players human again at the tick it
+ * announces (n64net_input_rejoined; genetPlayerRemoved stops removing them). */
+s32 genetAdmit(s32 machine)
+{
+    unsigned mask = 0;
+    if (!s_Online || !s_IsHost || s_Offline || machine <= 0 || machine > 3) return 1;
+    for (int p = 0; p < s_NumPlayers; p++) if (s_MachineOf[p] == machine) mask |= 1u << p;
+    if (!mask) return 1;
+    __atomic_store_n(&s_AdmitReq, (u32)machine + 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+static void applyRequests(void)
+{
+    for (int p = 0; p < 4; p++) {
+        const u32 a = __atomic_exchange_n(&s_DropReq[p], 0, __ATOMIC_ACQ_REL);
+        if (a) retirePlayer(p, (int)a - 1);
+    }
+    const u32 m1 = __atomic_exchange_n(&s_AdmitReq, 0, __ATOMIC_ACQ_REL);
+    if (m1 && s_Net) {
+        const int m = (int)m1 - 1;
+        unsigned mask = 0;
+        for (int p = 0; p < s_NumPlayers; p++) if (s_MachineOf[p] == m) mask |= 1u << p;
+        if (n64net_input_admit(s_Net, mask)) {
+            s_LeftMachines &= ~(1u << m);   /* nothing to decide or wait for about it any more */
+            if (!s_LeftMachines) s_LeftAtUs = 0;
+            netLog("machine %d: a new device joins (players %x), sending it the match so far", m + 1, mask);
+        } else {
+            netLog("machine %d: can't admit a new device now (players %x)", m + 1, mask);
+        }
+    }
+}
+
+/* The joiner (game thread, frame boundary): 1 while it hasn't played up to the tick its players go live at.
+ * Catching up, the game runs unpaced, nothing is drawn or heard, and its own inputs don't count. */
+static int catchingNow(void)
+{
+    uint32_t live = UINT32_MAX;
+    if (!s_Joining || s_CaughtUp || !s_Net) return 0;
+    if (!s_CatchStartUs) s_CatchStartUs = gnt_now_us();
+    n64net_input_log_ticks(s_Net, &live);
+    s_CatchLive = live == UINT32_MAX ? 0 : live;
+    if (!s_Offline && (n64net_input_catching_up(s_Net) || live == UINT32_MAX || s_Tick < live)) {
+        g_genetCatchingUp = 1;
+        return 1;
+    }
+    s_CaughtUp = 1;
+    g_genetCatchingUp = 0;
+    if (s_Offline) {
+        netLog("catching up stopped at tick %u (the match ended)", s_Tick);
+    } else {
+        netLog("caught up at tick %u in %.1f s: playing", s_Tick, (double)(gnt_now_us() - s_CatchStartUs) / 1e6);
+    }
+    s_NextUs = 0;   /* the frame schedule starts now */
+    return 0;
+}
+
+s32 genetCatchingUp(u32 *done, u32 *total)
+{
+    const int on = s_Joining && !s_CaughtUp;
+    if (done) *done = s_Tick;
+    if (total) *total = on ? s_CatchLive : s_Tick;
+    return on;
 }
 
 void genetExternalEventFrom(s32 event, s32 machine)
@@ -831,6 +914,7 @@ static void startSession(void)
         cfg.ticks_per_second = 60 / s_Step;
         cfg.send = netSend;
         cfg.log = netLogCb;
+        cfg.joining = s_Joining;
         s_Net = n64net_input_create(&cfg);
         {
             const char *r = envStr("GE_NET_ROLLBACK");
@@ -855,6 +939,7 @@ static void startSession(void)
         s_SkipIntroSaved = 1;
     }
     inputNetPure(1);
+    if (s_Joining) netLog("joining the running match: catching up with the host's input log first");
     netLog("connected as player %d (%s, input delay %u, seed %016llx%s)", s_Local + 1,
            s_Rollback ? "rollback in menus and matches" : "lockstep", n64net_input_get_delay(s_Net),
            (unsigned long long)s_Seed, s_ExtSend ? ", through the host app" : "");
@@ -952,6 +1037,11 @@ s32 genetInitExternal(const struct genetexternal *x)
     s_LeftMachines = 0;
     s_LeftAtUs = 0;
     s_DropoutMenu = x->dropoutmenu;
+    s_Joining = x->joining != 0;
+    s_CaughtUp = 0;
+    s_CatchStartUs = 0;
+    s_CatchLive = 0;
+    g_genetCatchingUp = 0;
     if (x->numplayers >= 2 && x->numplayers <= 4 && x->localmask != 0) {
         for (int p = 0; p < 4; p++) s_MachineOf[p] = x->machineofplayer[p];
         s_NumPlayers = x->numplayers;
@@ -962,6 +1052,10 @@ s32 genetInitExternal(const struct genetexternal *x)
     layoutSlots();
     s_Seed = x->seed;
     s_HaveSeed = 1;
+    if (!blobOk && s_Joining) {
+        netLog("i64: joining a running match needs the host's session blob");
+        return -1;
+    }
     if (!blobOk) {
         /* no session blob (i64 doesn't deliver one yet): the same handshake
          * and save transfer as genetConnect, over the host app's channel */
@@ -1162,6 +1256,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
         while (!n64net_input_ready(s_Net, tick)) {
             unsigned long long now;
             netPoll();
+            applyRequests();   /* the host's drop-out choice is what this wait may be waiting for */
             n64net_input_resend(s_Net);
             now = gnt_now_us();
             if (s_PeerLeft || now - lastCheck > 1000000) {
@@ -1651,6 +1746,7 @@ static void holdWhileAway(void)
     extern volatile int g_portQuit;   /* re-entry shutdown: let the thread reach a blocking point */
     while (awayNow() && !s_PeerLeft && !g_portQuit) {
         netPoll();
+        applyRequests();
         n64net_input_resend(s_Net);
         gnt_sleep_us(10000);
     }
@@ -1847,6 +1943,7 @@ static void waitConfirmed(u32 tick)
         uint32_t c = n64net_input_confirmed_tick(s_Net);
         if (c != UINT32_MAX && c + 1 >= tick) break;
         netPoll();
+        applyRequests();
         n64net_input_resend(s_Net);
         if (peerGone()) goOffline();
         gnt_sleep_us(250);
@@ -1968,6 +2065,12 @@ s32 genetFrameTicks(void)
 
     if (s_Online && !s_Offline) {
         netPoll(); /* host: answer save requests; both: keep the ledger moving */
+        applyRequests();
+        if (catchingNow()) {
+            /* fast-forward: no pacing, time sync or away hold; the host app may meter the ticks */
+            if (g_genetCatchupGate) g_genetCatchupGate();
+            return s_Step;
+        }
         holdWhileAway();
     }
     if (s_WindowOpen && !s_Offline && n64net_timesync_should_skip(s_Net)) {
