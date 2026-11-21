@@ -2080,3 +2080,15 @@ s32 genetFrameTicks(void)
     genetPace();
     return s_Step;
 }
+
+/* For i64's n64_game_phase (port/hostlib/ge_i64_module.c): 0 = menus (stage 90: title, file select, multiplayer
+ * setup) or a stage that is still loading, 1 = play; *humans = the stage's players (GE has no computer players). */
+int genetGamePhase(unsigned *humans)
+{
+    if (g_StageNum == 90 || g_StageNum < 0 || g_MainStageNum >= 0) {
+        *humans = 0;
+        return 0;
+    }
+    *humans = (unsigned)getPlayerCount();
+    return 1;
+}
