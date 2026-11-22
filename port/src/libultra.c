@@ -483,18 +483,36 @@ static void portThreadQuitExit(void)
     pthread_exit(NULL);
 }
 
+/* R1: for loops that park a thread for good (video's quit park, the render
+ * worker after a quit request): leave if portShutdownThreads is stopping the
+ * port, so the join succeeds and i64 can wipe the game memory safely (a parked
+ * thread that slept on used to wake into a wiped stack: gate 2026-11-22). */
+void portLeaveIfQuitting(void)
+{
+    if (!portQuitting()) return;
+    pthread_t self = pthread_self();
+    int ours = t_isPortThread || (s_rwStarted && pthread_equal(self, s_rwTh)) ||
+               (s_tickStarted && pthread_equal(self, s_tickTh));
+    if (ours) portThreadQuitExit();
+}
+
 void osCreateThread(OSThread *t, OSId id, void (*entry)(void *), void *arg,
                     void *sp, OSPri prio)
 {
     PortThread *pt = NULL;
     (void)sp; /* each host thread gets its own stack */
+    /* R1: never reuse the slot of a destroyed thread whose host thread still runs (osDestroyThread only drops
+     * the OSThread): clearing it lost that thread, shutdown never stopped or joined it, and it woke on a wiped
+     * stack after i64 reset the game memory (gate 2026-11-22, GoldenEye crash at stop). A finished one is
+     * joined before its slot is reused. */
     for (int i = 0; i < PORT_MAX_THREADS; ++i) {
-        if (!g_pt[i].os) { pt = &g_pt[i]; break; }
+        if (!g_pt[i].os && !(g_pt[i].started && g_pt[i].alive)) { pt = &g_pt[i]; break; }
     }
     if (!pt) {
         sysFatalError("osCreateThread: out of port thread slots");
         return;
     }
+    if (pt->started) pthread_join(pt->th, NULL);
 
     memset(pt, 0, sizeof(*pt));
     pt->os = t;
@@ -584,6 +602,11 @@ void osStartThread(OSThread *t)
     if (rc != 0) {
         sysFatalError("osStartThread: pthread_create failed (%d)", rc);
     }
+#if !defined(_WIN32)
+    /* R1: which N64 thread runs on which stack (i64 names a thread left on the game's memory by its sp) */
+    sysLogPrintf(LOG_NOTE, "thread id %d started (slot %d, stack 0x%llx)", (int)pt->id, (int)(pt - g_pt),
+                 (unsigned long long)(uintptr_t)lowStack);
+#endif
 }
 
 void osStopThread(OSThread *t)
@@ -600,6 +623,9 @@ void osDestroyThread(OSThread *t)
 {
     PortThread *pt = portFind(t);
     if (!pt) return;
+    if (pt->started && pt->alive && !pthread_equal(pt->th, pthread_self()))
+        sysLogPrintf(LOG_NOTE, "osDestroyThread: thread id %d destroyed while its host thread runs (kept for shutdown)",
+                     (int)pt->id);
     pt->os = NULL;
     t->id = 0;
 }
@@ -2126,7 +2152,7 @@ static void *portRenderWorker(void *arg)
              * boundary as before (D344). */
             if (videoQuitRequested()) {
                 pthread_mutex_unlock(&s_rwLock);
-                for (;;) sysSleep(100000);
+                for (;;) { portLeaveIfQuitting(); sysSleep(100000); }
             }
             /* D578: sleep until the next stored present is due, or a frame. */
             int64_t waitUs = 100 * 1000;
@@ -2235,9 +2261,10 @@ static int portRenderWorkerOn(void)
             pthread_attr_t attr;
             pthread_t th;
             pthread_attr_init(&attr);
+            void *lowStack = NULL;
 #if !defined(_WIN32)
             /* Same low stack as the game threads (see portAllocLowStack). */
-            void *lowStack = portAllocLowStack(PORT_THREAD_STACK);
+            lowStack = portAllocLowStack(PORT_THREAD_STACK);
             if (lowStack)
                 pthread_attr_setstack(&attr, lowStack, PORT_THREAD_STACK);
             else
@@ -2250,7 +2277,8 @@ static int portRenderWorkerOn(void)
                 s_rwTh = th;          /* joined by portShutdownThreads (R1) */
                 s_rwStarted = 1;
                 s_rwMode = 1;
-                sysLogPrintf(LOG_NOTE, "D481: render worker started");
+                sysLogPrintf(LOG_NOTE, "D481: render worker started (stack 0x%llx)",
+                             (unsigned long long)(uintptr_t)lowStack);
             } else {
                 sysLogPrintf(LOG_ERROR, "D481: render worker failed to start; gfx tasks run inline");
             }

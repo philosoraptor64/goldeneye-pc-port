@@ -1353,6 +1353,8 @@ static void videoRenderPark(void)
     SDL_AtomicSet(&s_inFrame, 0);
     SDL_AtomicSet(&s_parked, 1);
     for (;;) {
+        extern void portLeaveIfQuitting(void);
+        portLeaveIfQuitting();   /* R1: i64 stop joins this thread */
         sysSleep(100000);
     }
 }

@@ -1994,8 +1994,16 @@ static void rollbackPoint(void)
      * frames that end it (music, sound) must never be re-run */
     /* also in the menus (stage 90: title, file select, multiplayer setup), past the first second of the
      * stage like a match; a menu's stage change is settled before the stage unloads (genetStageExit) */
+    /* Menus (stage 90) are lockstep again unless GE_NET_MENU_ROLLBACK=1 (gate 2026-11-22, cellular profile): a
+     * menu press that changes the stage, predicted wrong on the other machine, was settled by a resimulation that
+     * ran one frame past the stage end there, so the two machines left the stage a tick apart and desynced. */
+    static int menuRollback = -1;
+    if (menuRollback < 0) {
+        const char *e = getenv("GE_NET_MENU_ROLLBACK");
+        menuRollback = e && atoi(e) ? 1 : 0;
+    }
     want = g_StageNum == s_LastStage && g_MainStageNum < 0 && T >= s_StageStart + s_RollbackFrom &&
-           (g_StageNum == 90 || (getPlayerCount() >= 2 && lvlGetControlsLockedFlag() == 0));
+           ((g_StageNum == 90 && menuRollback) || (g_StageNum != 90 && getPlayerCount() >= 2 && lvlGetControlsLockedFlag() == 0));
     if (!s_WindowOpen && want) {
         n64net_input_set_window(s_Net, s_RollbackWindow);
         n64net_input_set_auto_delay(s_Net, s_BaseDelay, 3);
