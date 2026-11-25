@@ -318,6 +318,12 @@ static const char *sysResolvePathRel(const char *rel)
     return sysResolvePath(tmp);
 }
 
+/* An online session (also after the others left): look inversion is per player (bondview2.c) */
+int genetSession(void)
+{
+    return s_Online;
+}
+
 int genetOnline(void)
 {
     return s_Online && !s_Offline;
@@ -1199,11 +1205,35 @@ static void botPad(u32 tick, int pad, OSContPad *out)
     out->errno = 0;
 }
 
+/* this machine's "Invert look" (F10 row, i64 default on) rides in bit 7 of its players'
+ * button words; joy.c keeps bits 6-7 away from the game's button reads */
+extern int inputPadLookInvert(void);
+static u16 withLook(u16 b)
+{
+    return (u16)((b & ~0x00C0) | (inputPadLookInvert() ? 0x0080 : 0));
+}
+
+/* the log says each player's look direction when it is first seen or changes */
+static void logLook(u32 tick, const OSContPad *out)
+{
+    static int seen[N64NET_INPUT_MAX_PLAYERS];
+    static u32 seenSession;
+    (void)tick;
+    if (seenSession != (u32)s_Seed) { memset(seen, 0, sizeof(seen)); seenSession = (u32)s_Seed; }
+    for (int p = 0; p < s_NumPlayers && p < N64NET_INPUT_MAX_PLAYERS; p++) {
+        int v = (out[p].button & 0x0080) ? 2 : 1;
+        if (seen[p] != v) {
+            seen[p] = v;
+            netLog("player %d looks %s", p + 1, v == 2 ? "inverted (push up = look down)" : "upright (push up = look up)");
+        }
+    }
+}
+
 static n64net_pad toNet(const OSContPad *p)
 {
     n64net_pad n;
     memset(&n, 0, sizeof(n));
-    n.buttons = p->button;
+    n.buttons = withLook(p->button);
     n.stick_x = p->stick_x;
     n.stick_y = p->stick_y;
     return n;
@@ -1222,7 +1252,10 @@ static void setLocalPads(u32 tick, const OSContPad *local)
 static void copyLocalPads(const OSContPad *local, OSContPad *out)
 {
     for (int p = 0; p < s_NumPlayers; p++) {
-        if (s_LocalMask & (1u << p)) out[p] = local[s_PadOf[p] & 3];
+        if (s_LocalMask & (1u << p)) {
+            out[p] = local[s_PadOf[p] & 3];
+            out[p].button = withLook(out[p].button);
+        }
     }
 }
 
@@ -1285,6 +1318,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
         out[p].stick_y = n.stick_y;
         out[p].errno = 0;
     }
+    if (tick >= 60) logLook(tick, out);   /* (the first ticks carry no one's input yet) */
 }
 
 static void endTick(u32 tick, u64 hash)

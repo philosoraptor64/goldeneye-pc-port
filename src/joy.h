@@ -29,6 +29,7 @@ s8 joy7000C174(s8 contpadnum);
 s8 joyGetStickY(s8 contpadnum);
 s8 joy7000C284(s8 contpadnum);
 u16 joyGetButtons(s8 contpadnum, u16 mask);
+s32 joyLookInvertBit(s8 contpadnum);
 u16 joyGetButtonsPressedThisFrame(s8 contpadnum, u16 mask);
 s32 joyGetStickXInRange(s8 contpadnum, s32 rangemin, s32 rangemax);
 s32 joyGetStickYInRange(s8 contpadnum, s32 rangemin, s32 rangemax);

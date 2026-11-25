@@ -179,6 +179,8 @@
 #define FLOAT_TEN_B 10.00f
 
 #include "bondview_internal.h"
+int genetSession(void);   /* port/src/genet.c */
+
 
 #define a8s "%8s"
 #define aX4_0f "x %4.0f"
@@ -4951,7 +4953,9 @@ void bondviewProcessInput(s8 stick_x, s8 stick_y, u16 buttons, u16 oldbuttons)
     moveData.rLeanRight = 0;
     moveData.detonating = 0;
     moveData.canAutoAim = 0;
-    moveData.invertPitch = get_cur_player_look_vertical_inverted() == 0;
+    /* port: online, each player's own "Invert look" (genet.c), not one shared setting */
+    moveData.invertPitch = (genetSession() ? joyLookInvertBit(get_cur_playernum())
+                                           : get_cur_player_look_vertical_inverted()) == 0;
     moveData.disableLookAhead = 0;
 
     if (stick_x < -5) {

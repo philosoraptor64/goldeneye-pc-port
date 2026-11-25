@@ -30,6 +30,7 @@ extern void set_cur_player_look_vertical_inverted(u32 value);
 extern int inputControlScheme(void);   /* D513: 0 Modern, 1 Original */
 extern int inputPadLookInvert(void);   /* D645 */
 extern void inputSetPadLookInvert(int v);
+extern int genetSession(void);   /* port/src/genet.c */
 extern void cur_player_set_aim_control(u32 value);
 extern void cur_player_set_lookahead(u32 value);
 extern void cur_player_set_sight_onscreen_control(u32 value);
@@ -644,9 +645,12 @@ void watchSettingsGameTick(void)
      * "Look up/down" row are one setting. Whichever changed since the last
      * tick wins; the game then applies it natively (C-buttons and the
      * aim-mode stick), as on the N64. */
+    /* Online the game's setting is left alone: it is one value for every player, and each
+     * machine writing its own player's choice into it made the machines differ. Each
+     * player's choice travels with their input instead (genet.c, bondview2.c). */
     static int lastRow = -1, lastGame = -1;
     if (!stageActive()) lastRow = -1;   /* re-sync on each stage entry */
-    if (stageActive() && g_CurrentPlayer && inputControlScheme() == 1) {
+    if (stageActive() && g_CurrentPlayer && inputControlScheme() == 1 && !genetSession()) {
         int row = inputPadLookInvert(), game = get_cur_player_look_vertical_inverted() ? 1 : 0;
         if (lastRow < 0) {   /* stage entry: the F10 row (edited in the front end) wins */
             if (row != game) set_cur_player_look_vertical_inverted(row);

@@ -1,6 +1,12 @@
 #include <ultra64.h>
 #include "joy.h"
 #include <PR/os.h>
+/* Port: bits 6-7 of an N64 button word are always 0 on the hardware. Online, a player's
+ * "Invert look" choice rides in bit 7 (genet.c), so every machine knows every player's
+ * choice at every tick (rollback included). The game never sees these bits as buttons. */
+#define JOY_PORT_BITS 0x00C0
+
+
 
 #define JOY_CLAMP_MIN          0
 #define JOY_CLAMP_MAX        120
@@ -402,7 +408,7 @@ void joyConsumeSamples(struct contdata *contdata)
             {
                 buttons1 = contdata->samples[samplenum].pads[i].button;
                 buttons2 = contdata->samples[(samplenum + (CONTSAMPLE_LEN-1)) % CONTSAMPLE_LEN].pads[i].button;
-                contdata->buttonspressed[i] |= buttons1 & ~buttons2;
+                contdata->buttonspressed[i] |= buttons1 & ~buttons2 & ~JOY_PORT_BITS;
 
                 if (samplenum == contdata->curlast)
                 {
@@ -589,6 +595,11 @@ s8 joy7000C284(s8 contpadnum)
     return g_ContDataPtr->samples[g_ContDataPtr->curstart].pads[contpadnum].stick_y;
 }
 
+s32 joyLookInvertBit(s8 contpadnum)
+{
+    return (g_ContDataPtr->samples[g_ContDataPtr->curlast].pads[contpadnum].button & 0x0080) != 0;
+}
+
 u16 joyGetButtons(s8 contpadnum, u16 mask)
 {
     if ((g_ContDataPtr->playbackcontcount < 0) && ((g_ConnectedControllers >> contpadnum & 1) == 0))
@@ -597,7 +608,7 @@ u16 joyGetButtons(s8 contpadnum, u16 mask)
         return 0;
     }
 
-    return g_ContDataPtr->samples[g_ContDataPtr->curlast].pads[contpadnum].button & mask;
+    return g_ContDataPtr->samples[g_ContDataPtr->curlast].pads[contpadnum].button & mask & ~JOY_PORT_BITS;
 }
 
 u16 joyGetButtonsPressedThisFrame(s8 contpadnum, u16 mask)

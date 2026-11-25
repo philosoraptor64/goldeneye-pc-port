@@ -202,6 +202,9 @@ static int geMainOnce(int argc, char **argv, int mode, int cycle)
      * keys are untouched), so a first launch from Desktop Mode no longer
      * skips it for good. */
     configLoad();
+#if defined(GE_I64_MODULE)
+    { extern void inputApplyLookDefault(void); inputApplyLookDefault(); }
+#endif
     videoApplySteamDeckPreset();
     updateCheckStart();   /* opt-in (Game.CheckUpdates, default off); no-op otherwise */
     /* persist config + window geometry on clean exit. Not in soak tests:

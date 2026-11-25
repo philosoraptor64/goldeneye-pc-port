@@ -517,6 +517,20 @@ int inputControlScheme(void) { return controlScheme; }
  * "Look up/down" (watchsettings.c keeps the two in sync both ways). */
 static int padLookInvertY = 0;                   /* Input.PadLookInvertY: 1 = invert the look stick's Y (right stick in SOLITARE roles, left stick in HONEY roles -- #145) */
 int inputPadLookInvert(void) { return padLookInvertY; }
+#if defined(GE_I64_MODULE)
+/* i64: inverted look is the default (owner, 2026-11-24: "especially for two-stick
+ * players"). Once per ini: a value saved before this default existed is replaced;
+ * a player's later choice is kept. Called after configLoad(). */
+static int s_lookDefaultSet = 0;
+void inputApplyLookDefault(void)
+{
+    if (!s_lookDefaultSet) {
+        padLookInvertY = 1;
+        s_lookDefaultSet = 1;
+        sysLogPrintf(LOG_INFO, "input: look inverted by default (i64)");
+    }
+}
+#endif
 void inputSetPadLookInvert(int v) { padLookInvertY = v ? 1 : 0; }
 static char padStr[MAX_PADS][PA_COUNT][32];      /* Input.Pad[N].<Action> */
 static char padStrKey[MAX_PADS][PA_COUNT][40];
@@ -4261,6 +4275,9 @@ PD_CONSTRUCTOR static void inputConfigInit(void)
     configRegisterInt("Input.PadLookSmooth", &padLookSmooth, 0, 10);   /* Wave A: look low-pass strength, 0-10 (0 = off) */
     configRegisterInt("Input.PadTriggerPct", &padTriggerPct, 1, 99);
     configRegisterInt("Input.PadLookInvertY", &padLookInvertY, 0, 1);
+#if defined(GE_I64_MODULE)
+    configRegisterInt("Input.LookDefaultSet", &s_lookDefaultSet, 0, 1);
+#endif
     /* D401: global rumble scale (0 = silent .. 1 = full), applied to every
      * pad in inputRumble(). One setting for all pads (user call, 2026-09-28):
      * the original per-pad Input.PlayerN.RumbleScale keys were dropped --
