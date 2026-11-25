@@ -288,7 +288,10 @@ static void portHeartbeatCheck(void)
     extern _Bool gfx_sdl_run_hidden;   /* i64 out of view: nothing is drawn on purpose (gfx_sdl2.cpp, a C++ bool) */
     /* ... and while i64 keeps the game paused in its menu (back to i64): no frames either, on purpose (2026-11-23:
      * a false hang report, with every thread dumped, each time a friend paused) */
-    if (gfx_sdl_run_hidden || g_portHostPaused) g_lastFrameUs = now;
+    /* ... and while netplay waits for the other machines (a network stall: the game holds; 2026-11-25, a false hang
+     * report in each conformance blackout) */
+    extern volatile int g_genetWaiting;
+    if (gfx_sdl_run_hidden || g_portHostPaused || g_genetWaiting) g_lastFrameUs = now;
     if (fired < 3 && now - g_lastFrameUs > 8000000 && now - g_lastHeartbeatUs > 5000000) {
         fired++;
         g_lastHeartbeatUs = now;

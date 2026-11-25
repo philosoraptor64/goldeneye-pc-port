@@ -319,6 +319,9 @@ static const char *sysResolvePathRel(const char *rel)
 }
 
 /* An online session (also after the others left): look inversion is per player (bondview2.c) */
+/* waiting for the other machines' input (a stall): no frames on purpose (libultra.c's hang check) */
+volatile int g_genetWaiting = 0;
+
 int genetSession(void)
 {
     return s_Online;
@@ -1286,6 +1289,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
     if (!n64net_input_ready(s_Net, tick)) {
         unsigned long long start = gnt_now_us(), lastCheck = start;
         s_Stalls++;
+        g_genetWaiting = 1;
         while (!n64net_input_ready(s_Net, tick)) {
             unsigned long long now;
             netPoll();
@@ -1295,6 +1299,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
             if (s_PeerLeft || now - lastCheck > 1000000) {
                 lastCheck = now;
                 if (peerGone()) {
+                    g_genetWaiting = 0;
                     s_StallUs += now - start;
                     goOffline();
                     copyLocalPads(local, out);
@@ -1303,6 +1308,7 @@ static void exchangeTick(u32 tick, const OSContPad *local, OSContPad *out)
             }
             gnt_sleep_us(250);
         }
+        g_genetWaiting = 0;
         s_StallUs += gnt_now_us() - start;
         /* restart the frame schedule from now: otherwise this side, now behind its
          * own 60 Hz schedule, rushes the next frames to catch up, gets ahead of the
@@ -1973,6 +1979,7 @@ static void cbAdvance(void *user)
 /* every input up to tick-1 confirmed (the ones the current state came from) */
 static void waitConfirmed(u32 tick)
 {
+    g_genetWaiting = 1;
     while (tick > 0 && !s_Offline) {
         uint32_t c = n64net_input_confirmed_tick(s_Net);
         if (c != UINT32_MAX && c + 1 >= tick) break;
@@ -1982,6 +1989,7 @@ static void waitConfirmed(u32 tick)
         if (peerGone()) goOffline();
         gnt_sleep_us(250);
     }
+    g_genetWaiting = 0;
 }
 
 static int runRollback(u32 T)
