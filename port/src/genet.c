@@ -193,6 +193,21 @@ static int s_WaitSecs = 60;
 static int s_DropSecs = 20;
 static long s_TestDesync = -1;
 static int s_DesyncReported = 0;
+/* resync after a desync (n64net_resync_*, GE_NET_NO_RESYNC=1: off): the host's state comes over with pointers
+ * translated (gesnapResync*, n64net_reloc.h) */
+static int s_ResyncOn = 0, s_ResyncFailed = 0, s_ResyncLoaded = 0;
+static uint32_t s_ResyncsDone = 0;
+static void cbResyncSave(void *user, uint8_t *out)
+{
+    (void)user;
+    gesnapResyncSave(out);
+}
+static void cbResyncLoad(void *user, const uint8_t *in)
+{
+    (void)user;
+    portRenderWaitIdle();   /* the GPU may still read the memory we write */
+    s_ResyncLoaded = gesnapResyncLoad(in);
+}
 static u32 s_Stalls = 0;
 static unsigned long long s_StallUs = 0;
 static u8 s_HostEep[GENET_EEP_SIZE];
@@ -935,6 +950,15 @@ static void startSession(void)
         }
         /* lockstep (menus) tolerates a longer delay; rollback keeps it short (rollbackPoint) */
         n64net_input_set_auto_delay(s_Net, cfg.input_delay, 6);
+        s_ResyncOn = s_ResyncFailed = 0;
+        s_ResyncsDone = 0;
+        /* off by default: a resync in the middle of a diverged match crashed the guest (chrpropUpdateRoomList) on
+         * the Mac; in-step resyncs and ones outside matches work. Suspect: the audio heap, left out of the
+         * snapshot (another thread owns it), against the host's sound state. GE_NET_RESYNC=1: on (tests). */
+        if (s_Net && envStr("GE_NET_RESYNC") && atoi(envStr("GE_NET_RESYNC")) && gesnapResyncSize()) {
+            s_ResyncOn = 1;
+            n64net_resync_enable(s_Net, s_Local == 0, (uint32_t)gesnapResyncSize(), cbResyncSave, cbResyncLoad, NULL);
+        }
     }
 
     s_Online = 1;
@@ -1340,10 +1364,22 @@ static void endTick(u32 tick, u64 hash)
     (void)hash;
     if (!s_DesyncReported && n64net_sync_desynced(s_Net, &dtick, &dkind)) {
         s_DesyncReported = 1;
-        netLog("DESYNC detected at tick %u", dtick);
-        if (s_ExtSend && !s_EndReason[0]) {
-            snprintf(s_EndReason, sizeof(s_EndReason),
-                     "The two games got out of step, so the match was stopped. (Both logs have the details.)");
+        netLog("DESYNC detected at tick %u%s", dtick, s_ResyncOn ? ": getting back in step (resync)" : "");
+    }
+    {
+        uint32_t done = 0;
+        const int rs = s_ResyncOn ? n64net_resync_status(s_Net, NULL, &done) : (s_DesyncReported ? 2 : 0);
+        if (rs == 2 && s_DesyncReported && !s_ResyncFailed) {
+            s_ResyncFailed = 1;
+            if (s_ExtSend && !s_EndReason[0]) {
+                snprintf(s_EndReason, sizeof(s_EndReason),
+                         "The two games got out of step, so the match was stopped. (Both logs have the details.)");
+            }
+        }
+        if (done != s_ResyncsDone) {   /* back in step: a later desync is reported (and resynced) again */
+            s_ResyncsDone = done;
+            s_DesyncReported = 0;
+            netLog("back in step (resync %u)", done);
         }
     }
     if (tick % STATS_EVERY == 0 && tick > 0) {
@@ -1559,6 +1595,14 @@ static s32 genetPlayback(struct contsample *samples, s32 curlast)
     if (s_Online && s_IsHost && (long)tick == s_TestDesync) {   /* (one side only, or both change alike) */
         g_randomSeed ^= 0x5a5a5a5aULL;
         netLog("test desync injected at tick %u", tick);
+    }
+    {   /* test: a resync of states in step (GE_NET_RELOC_DUMP=<dir>: compare them) */
+        static long resyncAt = -2;
+        if (resyncAt == -2) resyncAt = envStr("GE_NET_TEST_RESYNC") ? atol(envStr("GE_NET_TEST_RESYNC")) : -1;
+        if (s_Online && s_IsHost && s_ResyncOn && (long)tick == resyncAt) {
+            n64net_resync_request(s_Net);
+            netLog("test resync requested at tick %u", tick);
+        }
     }
 
     menuLog(tick);
@@ -2069,6 +2113,43 @@ static void rollbackPoint(void)
     }
 }
 
+/* Frame boundary, online (after rollbackPoint): every machine holds at the host's tick while the host's state
+ * comes over (n64net_resync_hold). A rollback that comes in meanwhile is replayed first. */
+static void resyncPoint(void)
+{
+    const u32 T = s_Tick;
+    unsigned long long start = 0;
+    uint32_t tmp;
+    if (!s_ResyncOn || !s_Online || s_Offline || !s_Net) return;
+    s_ResyncLoaded = 0;
+    g_genetWaiting = 1;
+    while (n64net_resync_hold(s_Net, T)) {
+        if (!start) {
+            start = gnt_now_us();
+            netLog("tick %u: holding for the resync", T);
+        }
+        netPoll();
+        applyRequests();
+        n64net_input_resend(s_Net);
+        if (s_WindowOpen && n64net_peek_rollback(s_Net, &tmp)) {
+            runRollback(T);
+            continue;
+        }
+        if (peerGone()) {
+            goOffline();
+            break;
+        }
+        gnt_sleep_us(300);
+    }
+    g_genetWaiting = 0;
+    if (start) {
+        s_StallUs += gnt_now_us() - start;
+        netLog("tick %u: resync hold over after %.2f s%s", T, (double)(gnt_now_us() - start) / 1e6,
+               s_ResyncLoaded ? " (the host's state is loaded)" : "");
+        if (s_ResyncLoaded && s_WindowOpen) runRollback(T);   /* saves the loaded state (the old ones are gone) */
+    }
+}
+
 /* src/boss.c, the stage loop has just ended (g_MainStageNum >= 0). Returns 1
  * if a rollback undid the stage end (the loop resumes). */
 int genetStageExit(void)
@@ -2101,6 +2182,7 @@ s32 genetFrameTicks(void)
     genetInit();
     frameBoundary();
     rollbackPoint();
+    resyncPoint();
     if (s_PlaybackOn) recordHashes();
 
     if (!s_PlaybackOn) {

@@ -23,6 +23,14 @@ void free(void *p);
 #if GE_SNAPSHOT_SUPPORTED
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+void *realloc(void *p, size_t n);
+void *calloc(size_t n, size_t m);
+char *getenv(const char *name);
+int getpid(void);
+#include "n64net_reloc.h"
+/* i64's game memory arena (n64_game.h: I64_ARENA_BASE, I64_ARENA_SIZE) */
+#define GE_I64_ARENA_BASE 0x110000000ULL
+#define GE_I64_ARENA_SIZE (576ULL << 20)
 
 void joyPortPlaybackData(void **p, size_t *n);   /* src/joy.c */
 
@@ -74,7 +82,7 @@ void gesnapExcludeRange(void *p, unsigned long size)
 /* this image (the app, or the i64 module dylib) */
 extern const char __dso_handle;
 
-int gesnapInit(int slots)
+static void setupRanges(void)
 {
     unsigned long size = 0;
     void *p;
@@ -108,6 +116,11 @@ int gesnapInit(int slots)
 
     s_Total = 0;
     for (int i = 0; i < s_NumR; i++) s_Total += s_R[i].size;
+}
+
+int gesnapInit(int slots)
+{
+    setupRanges();
     s_Slots = (Slot *)malloc(sizeof(Slot) * (size_t)slots);
     if (!s_Slots) return 0;
     for (int i = 0; i < slots; i++) {
@@ -160,6 +173,79 @@ int gesnapLoad(int slot)
 void gesnapInvalidateAll(void)
 {
     for (int i = 0; i < s_NumSlots; i++) s_Slots[i].valid = 0;
+}
+
+/* ---- resync (getting back in step after a desync): the same ranges in a form another device can load ----
+ * (n64net_reloc.h). DRAM, the stacks and the cart sit at the same fixed addresses on every device (i64's game
+ * memory arena), so only pointers into this image need translating. */
+static n64net_reloc s_Reloc;
+
+static int resyncSpans(n64net_reloc_span *sp)
+{
+    if (!s_NumR) setupRanges();
+    n64net_reloc_free(&s_Reloc);
+    if (!n64net_reloc_init(&s_Reloc, &__dso_handle)) return 0;
+    /* i64's game memory arena (DRAM, stacks, the cart): at one fixed address on every device, so pointers into
+     * it go as offsets that mean the same thing there (not as "elsewhere in memory", which the guest would keep
+     * its own of) */
+    n64net_reloc_add(&s_Reloc, (const void *)(uintptr_t)GE_I64_ARENA_BASE, (size_t)GE_I64_ARENA_SIZE);
+    s_Reloc.no_foreign = 1;   /* no heap pointers in the state (a resync of states in step: 0 own, 0 matched) */
+    for (int i = 0; i < s_NumR && i < N64NET_RELOC_MAX_SPANS; i++) {
+        sp[i].base = s_R[i].base;
+        sp[i].used = sp[i].cap = s_R[i].size;
+    }
+    return s_NumR;
+}
+
+size_t gesnapResyncSize(void)
+{
+    unsigned long size = 0, total = sizeof(n64net_reloc_header) + 8 * MAX_RANGES;
+    void *p;
+    size_t n;
+    /* the most it can be (the audio heap is left out later): globals, all of DRAM, the playback buffer */
+    if (getsectiondata((const struct mach_header_64 *)&__dso_handle, GE_SNAPSHOT_SEGMENT, "__data", &size)) total += size;
+    size = 0;
+    if (getsectiondata((const struct mach_header_64 *)&__dso_handle, GE_SNAPSHOT_SEGMENT, "__bss", &size)) total += size;
+    joyPortPlaybackData(&p, &n);
+    return total + PORT_DRAM_SIZE + n;
+}
+
+void gesnapResyncSave(unsigned char *out)
+{
+    n64net_reloc_span sp[MAX_RANGES];
+    n64net_reloc_stats st;
+    const int n = resyncSpans(sp);
+    if (!n) return;
+    n64net_reloc_scan(&s_Reloc);
+    n64net_reloc_save(&s_Reloc, sp, n, out, &st);
+    sysLogPrintf(LOG_NOTE, "resync state: %d ranges, %llu words in the game's image, %llu elsewhere", n,
+                 (unsigned long long)st.region_ptrs, (unsigned long long)st.foreign);
+    if (getenv("GE_NET_RELOC_DUMP")) {   /* test: <dir>/ge-resync-<pid>.bin, to compare two devices */
+        char path[1024];
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/ge-resync-%d.bin", getenv("GE_NET_RELOC_DUMP"), (int)getpid());
+        if ((f = fopen(path, "wb"))) {
+            fwrite(out, 1, n64net_reloc_state_size(sp, n), f);
+            fclose(f);
+        }
+    }
+}
+
+int gesnapResyncLoad(const unsigned char *in)
+{
+    n64net_reloc_span sp[MAX_RANGES];
+    n64net_reloc_stats st;
+    const int n = resyncSpans(sp);
+    int ok;
+    if (!n) return 0;
+    n64net_reloc_scan(&s_Reloc);
+    ok = n64net_reloc_load(&s_Reloc, sp, n, in, NULL, &st);
+    sysLogPrintf(LOG_NOTE, "resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, "
+                 "%llu guessed", ok ? "done" : "REFUSED", (unsigned long long)st.same,
+                 (unsigned long long)st.translated, (unsigned long long)st.own_pointer,
+                 (unsigned long long)st.matched, (unsigned long long)st.guessed);
+    if (ok) gesnapInvalidateAll();   /* the ring is from the old timeline */
+    return ok;
 }
 
 /* Compares the live state with a slot; writes a short report of the first
@@ -227,6 +313,9 @@ size_t gesnapSize(void) { return s_Total; }
 #else
 
 int gesnapSupported(void) { return 0; }
+size_t gesnapResyncSize(void) { return 0; }
+void gesnapResyncSave(unsigned char *out) { (void)out; }
+int gesnapResyncLoad(const unsigned char *in) { (void)in; return 0; }
 void gesnapExcludeRange(void *p, unsigned long size) { (void)p; (void)size; }
 int gesnapInit(int slots) { (void)slots; return 0; }
 void gesnapSave(int slot) { (void)slot; }

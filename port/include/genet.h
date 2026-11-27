@@ -61,5 +61,9 @@ void gesnapDumpDiff(int slot, const char *path);
 double gesnapLastSaveMs(void);
 double gesnapLastLoadMs(void);
 size_t gesnapSize(void);
+/* resync (n64net_resync_*): the snapshot in a form another device can load (n64net_reloc.h); size 0 = none */
+size_t gesnapResyncSize(void);
+void gesnapResyncSave(unsigned char *out);
+int gesnapResyncLoad(const unsigned char *in);
 
 #endif
