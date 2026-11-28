@@ -65,5 +65,7 @@ size_t gesnapSize(void);
 size_t gesnapResyncSize(void);
 void gesnapResyncSave(unsigned char *out);
 int gesnapResyncLoad(const unsigned char *in);
+/* live resync: copy the state now (the hold tick); gesnapResyncSave then encodes the copy (any thread) */
+void gesnapResyncCapture(void);
 
 #endif

@@ -211,10 +211,54 @@ size_t gesnapResyncSize(void)
     return total + PORT_DRAM_SIZE + n + N64NET_RELOC_MAX_SPLIT * sizeof(n64net_reloc_split_);   /* + align4's list */
 }
 
+/* Live resync (n64net_resync_set_live): the state at the hold tick, copied (the ranges) with the regions as they
+ * were; gesnapResyncSave then encodes the copy on n64net's worker thread while the game goes on. */
+static unsigned char *s_CapBytes;
+static size_t s_CapRoom;
+static n64net_reloc_span s_CapSpans[MAX_RANGES];
+static int s_CapN, s_CapValid;
+static n64net_reloc s_RelocEnc;
+
+void gesnapResyncCapture(void)
+{
+    n64net_reloc_span sp[MAX_RANGES];
+    size_t total = 0, at = 0;
+    int i;
+    s_CapValid = 0;
+    const int n = resyncSpans(sp);
+    if (!n) return;
+    for (i = 0; i < n; i++) total += (sp[i].used + 7) & ~(size_t)7;
+    if (s_CapRoom < total) {
+        free(s_CapBytes);
+        s_CapBytes = (unsigned char *)malloc(total);
+        s_CapRoom = s_CapBytes ? total : 0;
+        if (!s_CapBytes) return;
+    }
+    for (i = 0; i < n; i++) {
+        memcpy(s_CapBytes + at, sp[i].base, sp[i].used);
+        s_CapSpans[i] = sp[i];
+        s_CapSpans[i].base = s_CapBytes + at;
+        at += (sp[i].used + 7) & ~(size_t)7;
+    }
+    s_RelocEnc = s_Reloc;   /* the regions; the memory map: the worker's own */
+    s_RelocEnc.vm = NULL;
+    s_RelocEnc.num_vm = s_RelocEnc.cap_vm = 0;
+    s_CapN = n;
+    s_CapValid = 1;
+}
+
 void gesnapResyncSave(unsigned char *out)
 {
     n64net_reloc_span sp[MAX_RANGES];
     n64net_reloc_stats st;
+    if (s_CapValid) {   /* live: the capture (n64net's worker thread) */
+        s_CapValid = 0;
+        n64net_reloc_scan(&s_RelocEnc);
+        n64net_reloc_save(&s_RelocEnc, s_CapSpans, s_CapN, out, &st);
+        sysLogPrintf(LOG_NOTE, "resync state (captured): %d ranges, %llu words in the game's image", s_CapN,
+                     (unsigned long long)st.region_ptrs);
+        return;
+    }
     const int n = resyncSpans(sp);
     if (!n) return;
     n64net_reloc_scan(&s_Reloc);
@@ -239,7 +283,16 @@ int gesnapResyncLoad(const unsigned char *in)
     const int n = resyncSpans(sp);
     int ok;
     if (!n) return 0;
-    n64net_reloc_scan(&s_Reloc);
+    if (s_RelocEnc.num_vm > 0 && s_RelocEnc.vm) {   /* live: the map the worker just scanned (~10 ms here) */
+        free(s_Reloc.vm);
+        s_Reloc.vm = s_RelocEnc.vm;
+        s_Reloc.num_vm = s_RelocEnc.num_vm;
+        s_Reloc.cap_vm = s_RelocEnc.cap_vm;
+        s_RelocEnc.vm = NULL;
+        s_RelocEnc.num_vm = s_RelocEnc.cap_vm = 0;
+    } else {
+        n64net_reloc_scan(&s_Reloc);
+    }
     ok = n64net_reloc_load(&s_Reloc, sp, n, in, NULL, &st);
     sysLogPrintf(LOG_NOTE, "resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, "
                  "%llu guessed", ok ? "done" : "REFUSED", (unsigned long long)st.same,
@@ -317,6 +370,7 @@ int gesnapSupported(void) { return 0; }
 size_t gesnapResyncSize(void) { return 0; }
 void gesnapResyncSave(unsigned char *out) { (void)out; }
 int gesnapResyncLoad(const unsigned char *in) { (void)in; return 0; }
+void gesnapResyncCapture(void) {}
 void gesnapExcludeRange(void *p, unsigned long size) { (void)p; (void)size; }
 int gesnapInit(int slots) { (void)slots; return 0; }
 void gesnapSave(int slot) { (void)slot; }

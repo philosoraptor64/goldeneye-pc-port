@@ -202,6 +202,13 @@ static void cbResyncSave(void *user, uint8_t *out)
     (void)user;
     gesnapResyncSave(out);
 }
+/* live resync (no hold) while the rollback window is open; GE_NET_RESYNC_HOLD=1: always hold */
+static int s_ResyncLive = 0;
+static void cbResyncCapture(void *user)
+{
+    (void)user;
+    gesnapResyncCapture();
+}
 static void cbResyncLoad(void *user, const uint8_t *in)
 {
     (void)user;
@@ -957,6 +964,7 @@ static void startSession(void)
         if (s_Net && !(envStr("GE_NET_NO_RESYNC") && atoi(envStr("GE_NET_NO_RESYNC"))) && gesnapResyncSize()) {
             s_ResyncOn = 1;
             n64net_resync_enable(s_Net, s_Local == 0, (uint32_t)gesnapResyncSize(), cbResyncSave, cbResyncLoad, NULL);
+            s_ResyncLive = getenv("GE_NET_RESYNC_HOLD") == NULL;
         }
     }
 
@@ -2101,6 +2109,7 @@ static void rollbackPoint(void)
         waitConfirmed(T);
         closing = 1;
     }
+    if (s_ResyncOn) n64net_resync_set_live(s_Net, s_ResyncLive && s_WindowOpen && !closing ? cbResyncCapture : NULL);
     if (s_WindowOpen) {
         runRollback(T);
     }
