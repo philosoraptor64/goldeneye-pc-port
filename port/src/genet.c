@@ -952,10 +952,9 @@ static void startSession(void)
         n64net_input_set_auto_delay(s_Net, cfg.input_delay, 6);
         s_ResyncOn = s_ResyncFailed = 0;
         s_ResyncsDone = 0;
-        /* off by default: a resync in the middle of a diverged match crashed the guest (chrpropUpdateRoomList) on
-         * the Mac; in-step resyncs and ones outside matches work. Suspect: the audio heap, left out of the
-         * snapshot (another thread owns it), against the host's sound state. GE_NET_RESYNC=1: on (tests). */
-        if (s_Net && envStr("GE_NET_RESYNC") && atoi(envStr("GE_NET_RESYNC")) && gesnapResyncSize()) {
+        /* GE_NET_NO_RESYNC=1: off. (A resync of a diverged match used to crash the guest in chrpropUpdateRoomList;
+         * fixed with zeroed locals and align4, see gesnap.c.) */
+        if (s_Net && !(envStr("GE_NET_NO_RESYNC") && atoi(envStr("GE_NET_NO_RESYNC"))) && gesnapResyncSize()) {
             s_ResyncOn = 1;
             n64net_resync_enable(s_Net, s_Local == 0, (uint32_t)gesnapResyncSize(), cbResyncSave, cbResyncLoad, NULL);
         }

@@ -970,7 +970,9 @@ if(GE_HAVE_METAL)
   list(REMOVE_ITEM _GE_SNAP_SRC "${CMAKE_SOURCE_DIR}"
        "${CMAKE_SOURCE_DIR}/src/game/speedgraphrenderer.c")   # performance graph (display only)
   set_source_files_properties(${_GE_SNAP_SRC} PROPERTIES COMPILE_OPTIONS
-    "-include;${CMAKE_SOURCE_DIR}/port/include/gesnap.h;-DGE_SNAPSHOT_FORCE")
+    "-include;${CMAKE_SOURCE_DIR}/port/include/gesnap.h;-DGE_SNAPSHOT_FORCE;-ftrivial-auto-var-init=zero")
+  # -ftrivial-auto-var-init=zero: struct padding copied into the state holds no leftover stack bytes (they
+  # differ per device and can look like addresses to a resync's translation; see perfect_dark 254c8acf7)
 endif()
 
 # ----------------------------------------------------------------------------

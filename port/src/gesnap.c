@@ -189,6 +189,7 @@ static int resyncSpans(n64net_reloc_span *sp)
      * it go as offsets that mean the same thing there (not as "elsewhere in memory", which the guest would keep
      * its own of) */
     n64net_reloc_add(&s_Reloc, (const void *)(uintptr_t)GE_I64_ARENA_BASE, (size_t)GE_I64_ARENA_SIZE);
+    s_Reloc.align4 = 2;   /* pointers 2, 4 or 6 bytes into a word (packed structs) */
     s_Reloc.no_foreign = 1;   /* no heap pointers in the state (a resync of states in step: 0 own, 0 matched) */
     for (int i = 0; i < s_NumR && i < N64NET_RELOC_MAX_SPANS; i++) {
         sp[i].base = s_R[i].base;
@@ -207,7 +208,7 @@ size_t gesnapResyncSize(void)
     size = 0;
     if (getsectiondata((const struct mach_header_64 *)&__dso_handle, GE_SNAPSHOT_SEGMENT, "__bss", &size)) total += size;
     joyPortPlaybackData(&p, &n);
-    return total + PORT_DRAM_SIZE + n;
+    return total + PORT_DRAM_SIZE + n + N64NET_RELOC_MAX_SPLIT * sizeof(n64net_reloc_split_);   /* + align4's list */
 }
 
 void gesnapResyncSave(unsigned char *out)
@@ -225,7 +226,7 @@ void gesnapResyncSave(unsigned char *out)
         FILE *f;
         snprintf(path, sizeof(path), "%s/ge-resync-%d.bin", getenv("GE_NET_RELOC_DUMP"), (int)getpid());
         if ((f = fopen(path, "wb"))) {
-            fwrite(out, 1, n64net_reloc_state_size(sp, n), f);
+            fwrite(out, 1, n64net_reloc_state_size_r(&s_Reloc, sp, n), f);
             fclose(f);
         }
     }
